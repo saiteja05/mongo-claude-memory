@@ -1,0 +1,20 @@
+{
+  "name": "mongo-claude-memory",
+  "version": "0.1.0",
+  "description": "MongoDB Atlas-backed memory engine for Claude Code",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "setup:indexes": "node dist/db/setupIndexes.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
