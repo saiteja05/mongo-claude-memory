@@ -70,6 +70,18 @@ Capture is a pure, lock-free append (every writer does an independent `insertOne
 
 ---
 
+## What stays unchanged
+
+This system integrates through Claude Code's public extension points only, so it is worth being explicit about the boundary: everything below keeps behaving exactly as it does in stock Claude Code.
+
+- **Claude Code itself is not modified, forked, wrapped, or proxied.** Integration is entirely through official extension points: hooks registered in `settings.json`, an MCP server, and a `/remember` slash command. Removing those three registrations returns Claude Code to stock behavior with zero residue.
+- **`CLAUDE.md` keeps working exactly as before.** This system does not read, move, or replace hand-written `CLAUDE.md` instructions (root or nested). It replaces only Claude Code's *learned* auto memory (the `MEMORY.md` index and topic files), the discretionary recall path, not the instructional one.
+- **The conversation loop, model selection, permissions and approval model, other tools, and compaction behavior are untouched.** This system only adds context at `SessionStart` (re-injected on compact and resume) and offers three optional MCP tools (`memory_search`, `memory_write`, `memory_forget`); it changes nothing else about how a session runs.
+- **Failure isolation is total.** If MongoDB, Voyage, or the LLM provider is unreachable, all three hooks fail open and exit `0`, so a session behaves like stock Claude Code plus, at most, a missing brief. `memory_search` degrades to an explicit empty or degraded result rather than throwing.
+- **No data leaves infrastructure the user chose.** Memory lives only in the user's own Atlas cluster, and embedding, rerank, and fact-extraction calls go only to the providers the user configured (Voyage or the Atlas model API, Anthropic or Bedrock).
+
+---
+
 ## Data model
 
 Four collections, defined in `src/db/schema.ts`.
