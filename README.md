@@ -222,6 +222,140 @@ Invoked with no arguments, it discovers and processes every project with pending
 
 ---
 
+## Using it
+
+Once the hooks and MCP server are registered (see Getting started above), day-to-day use has four modes: things that happen without you doing anything, explicitly saving a fact, recalling something on demand, and forgetting something. A fifth section covers the maintenance job that turns raw capture into durable memory.
+
+### 1. What happens automatically
+
+Nothing to configure per session. Three hooks run without any user action:
+
+- **`SessionStart`** (start, compact, resume): fetches `brief:global` and `brief:<project>` with a single `findOne` each and injects their combined `content` as `additionalContext`. Conceptually, the injected brief reads like a short paragraph of standing facts and conventions, for example "Prefers pnpm over npm. This repo's CI gate is `npm run build && npm test`. Uses Bedrock in prod, Anthropic API in dev." It is capped at `BRIEF_CORE_TOKEN_CAP` (800 tokens, global) plus `BRIEF_PROJECT_TOKEN_CAP` (1200 tokens, per project), so it is always a small, fixed-size block, not the full memory store.
+- **`UserPromptSubmit`**: any prompt whose first non-whitespace character is `#` is captured as a high-priority observation (`source: "hash_line"`), the same mechanism Claude Code's own quick-add uses. For example typing `# always run migrations before seeding` writes that line to `observations`; the prompt still passes through to Claude unmodified.
+- **`SessionEnd`**: captures the last 50,000 characters of the session transcript as one normal-priority observation (`source: "transcript"`), for the consolidator to later extract facts from.
+
+All three hooks fail open: if MongoDB is unreachable or misconfigured, they no-op silently and exit `0`. You will never see a memory-path error surface in a session.
+
+### 2. Explicitly remembering something
+
+Two ways to write a fact directly, both landing in `observations` as high-priority (never expire, never subject to `OBSERVATION_TTL_DAYS`):
+
+**`/remember` slash command**, typed in Claude Code:
+
+```
+/remember always run migrations before seeding the dev database
+```
+
+This writes the argument text to a temp file, then runs `node dist/capture/remember.js --file <path>`, which resolves the project key from the current working directory and writes an observation with `source: "remember"`. On success it prints `Saved to memory (project: <project>).`
+
+**`memory_write` MCP tool**, for Claude to call on your behalf mid-conversation:
+
+```json
+{
+  "tool": "memory_write",
+  "arguments": {
+    "text": "This repo's CI gate is npm run build && npm test",
+    "project": "mongo-claude-memory"
+  }
+}
+```
+
+`project` and `session_id` are optional and default to the server's resolved project key and `"mcp:memory_write"` respectively. Either path writes only an observation, never a belief directly: only the offline consolidator promotes an observation into a durable, ranked belief.
+
+### 3. Recalling something
+
+The always-injected brief is the first, free recall path; `memory_search` is the on-demand tool for anything that did not fit in the brief's token cap. A user would just ask a natural question:
+
+> "What did we decide about the rerank fallback order?"
+
+and Claude calls the tool itself:
+
+```json
+{
+  "tool": "memory_search",
+  "arguments": {
+    "query": "rerank fallback order",
+    "project": "mongo-claude-memory",
+    "scope": "project",
+    "limit": 5
+  }
+}
+```
+
+| Parameter | Required | Notes |
+|---|---|---|
+| `query` | yes | Free-text search string |
+| `project` | no | Defaults to the MCP server's resolved project key |
+| `scope` | no | `core`, `project`, or `archive`; unset searches without a scope filter |
+| `limit` | no | Defaults to 8 |
+
+The response is:
+
+```json
+{
+  "results": [
+    { "_id": "...", "text": "...", "scope": "project", "type": "convention", "importance": 0.8, "score": 0.71 }
+  ],
+  "degraded": null
+}
+```
+
+`degraded` is `null` on a full hybrid ($rankFusion vector + BM25, optionally reranked) run. If part of the pipeline is unavailable it becomes a short reason string instead of throwing, for example `"vector-only: Atlas Search unavailable"`, `"text-only: vector search unavailable"`, or, if everything fails, `"unavailable: memory search failed on every path"` with an empty `results` array.
+
+### 4. Forgetting something
+
+```json
+{
+  "tool": "memory_forget",
+  "arguments": {
+    "beliefId": "665f1a2b3c4d5e6f7a8b9c0d",
+    "project": "mongo-claude-memory"
+  }
+}
+```
+
+This does not hard-delete anything. It sets that belief's `status` to `"tombstoned"`, bumps `version`, and updates `updated_at`, filtered on both `_id` and `project` so a caller cannot tombstone another project's belief by guessing an id. A tombstoned belief is excluded from the brief and from `memory_search` results, and is hard-deleted only later, by the partial TTL index, 90 days after tombstoning.
+
+### 5. Keeping memory tidy
+
+Observations pile up from capture; the consolidator (`node dist/consolidation/cli.js`) is the offline job that turns them into deduplicated, ranked beliefs and recompiles the brief. It is a cron/trigger entry point, not a hook, so it prints normal output and exits non-zero on a genuine failure. See Consolidator scheduling above for the recommended cron line (every 15 minutes).
+
+```bash
+# Process every project with pending observations
+node dist/consolidation/cli.js
+
+# Process a single project only
+node dist/consolidation/cli.js mongo-claude-memory
+```
+
+A run acquires a per-project lease, claims a batch of pending observations, extracts facts with the configured LLM, embeds and vector-dedupes them against existing beliefs, upserts (or supersedes/archives) beliefs, recompiles the affected brief, and marks the batch consolidated.
+
+**Preview without writing anything:**
+
+```bash
+node dist/consolidation/cli.js mongo-claude-memory --dry-run
+```
+
+Runs the same extraction and dedup logic and reports what would change, without touching `beliefs`, `briefs`, or observation status.
+
+**Check health:**
+
+```bash
+node dist/consolidation/cli.js --status
+```
+
+Reports pending/claimed/consolidated observation counts, stale-claim counts, current lock/lease state, belief counts by project and status, and brief metadata, all as a point-in-time snapshot. No LLM call.
+
+**Undo a bad run:**
+
+```bash
+node dist/consolidation/cli.js --rollback --run-id <id>
+```
+
+(or `--rollback <id>` as a bare positional). Reverts the belief and brief changes made by that specific run, using each belief's provenance (`observation_ids`, `supersedes`, `generation`). Find the run id in the consolidator's own log output or via `--status`.
+
+---
+
 ## Configuration modes
 
 ### Embedding modes (`EMBEDDING_MODE`)
