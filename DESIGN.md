@@ -143,17 +143,38 @@ The design is built on the GA column and treats the Preview column as optional.
 
 - A **SessionEnd hook** ships the session transcript (or a cheap rolling summary
   of it) to the `observations` collection as one or more documents.
-- `/remember` and `#`-prefixed lines land in the same collection as
-  `priority: "high"` observations. A `UserPromptSubmit` hook intercepts `#`
-  lines, writes them, and strips them from the prompt.
+- **`/remember`** is the primary, fully-reliable user-driven capture path: a
+  custom slash command we define ourselves, so its behavior is fully within our
+  control, unlike a client UI behavior we would merely be intercepting. It
+  writes a `priority: "high"` observation with `source: "remember"`.
+- A **`UserPromptSubmit` hook** adds a best-effort secondary path, with a
+  corrected, narrower role than earlier drafts assumed. Docs-verified
+  limitation: a `UserPromptSubmit` hook can only (a) block the entire prompt so
+  it never reaches the model, or (b) inject additional, invisible
+  `additionalContext` alongside the original, unmodified prompt. It cannot
+  selectively strip or rewrite part of the prompt's text, so it cannot detect
+  and remove a `#` line while letting the rest through. This is a confirmed
+  hook limitation, not a bug to fix later. Its corrected role: detect prompts
+  whose first non-whitespace character is `#`, and, as a side effect (without
+  blocking or modifying the prompt), write that prompt's text to
+  `observations` as a `priority: "high"` observation with
+  `source: "hash_line"`. The `#` text still reaches the model unmodified, as a
+  normal prompt: that is an accepted tradeoff, not a stripped marker.
+- Whether Claude Code's built-in `#` quick-memory-add UI intercepts the `#`
+  character client-side, before a `UserPromptSubmit` hook even fires, and
+  whether that behavior is independent of `autoMemoryEnabled`, is undocumented
+  and was not possible to confirm either way. Treat `/remember` as the
+  dependable capture path and the `hash_line` hook detection as a best-effort
+  secondary path, not something to rely on exclusively.
 - The MCP `memory_write` verb also writes an observation, never a belief. This
   keeps beliefs single-writer (section 7).
 - Nothing is judged in the moment. Capture is a pure append, so it has the ideal
   concurrency profile: unlimited parallel writers, zero coordination (section 7).
 
-Built-in auto memory is disabled (`autoMemoryEnabled: false`). The built-in `#`
-and `/memory` UI cannot be rewired, so we supersede them with our own
-`/remember` command and hook rather than hijacking them.
+Built-in auto memory is disabled (`autoMemoryEnabled: false`). We do not rewire
+or depend on the built-in `#` and `/memory` UI: `/remember` and the
+`hash_line` hook detection are independent capture mechanisms that run
+alongside whatever the built-in UI does.
 
 ### 5.2 Consolidation: the intelligence, offline and leased
 
@@ -533,7 +554,9 @@ features added only as flagged enhancements.
 - Disable built-in auto memory.
 - SessionEnd hook shipping transcript summaries into `observations`.
 - `/remember` command and `#`-line `UserPromptSubmit` hook, both writing
-  high-priority observations and stripping the marker.
+  high-priority observations; the hook detects the `#` line but, per the
+  confirmed `UserPromptSubmit` limitation (section 5.1), neither strips nor
+  blocks it, so the prompt still reaches the model unmodified.
 - Exit: finishing a session and typing `#` both produce the expected
   observations, and no `.md` memory file is written.
 

@@ -6,6 +6,7 @@ const ENV_KEYS = [
   "VOYAGE_API_KEY",
   "VOYAGE_MODEL",
   "VOYAGE_DIMENSIONS",
+  "VOYAGE_BASE_URL",
 ] as const;
 
 const SECRET_API_KEY = "pa-totally-secret-voyage-key";
@@ -93,5 +94,114 @@ describe("embed", () => {
     const { embed } = await import("../src/embeddings/voyage.js");
     await expect(embed(["hello"], "query")).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts and eventually rejects instead of hanging when the request never settles", async () => {
+    vi.useFakeTimers();
+    // Simulate a hung Voyage response: the returned promise only ever settles
+    // if the caller's AbortSignal fires, exactly like real fetch() behaves
+    // when its signal is aborted.
+    const fetchMock = vi.fn((_url: string, options?: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => {
+          reject(new Error("The operation was aborted."));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { embed } = await import("../src/embeddings/voyage.js");
+    const resultPromise = embed(["hello"], "query");
+    resultPromise.catch(() => {});
+
+    await vi.runAllTimersAsync();
+
+    await expect(resultPromise).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("base URL configuration", () => {
+  it("embed() and rerank() call fetch against the default api.voyageai.com URLs", async () => {
+    const embedFetchMock = vi.fn(async () =>
+      fakeResponse(200, { data: [{ embedding: [0.1, 0.2], index: 0 }] })
+    );
+    vi.stubGlobal("fetch", embedFetchMock);
+
+    const { embed } = await import("../src/embeddings/voyage.js");
+    await embed(["hello"], "query");
+
+    expect(embedFetchMock).toHaveBeenCalledWith(
+      "https://api.voyageai.com/v1/embeddings",
+      expect.anything()
+    );
+
+    const rerankFetchMock = vi.fn(async () =>
+      fakeResponse(200, { data: [{ index: 0, relevance_score: 0.9 }] })
+    );
+    vi.stubGlobal("fetch", rerankFetchMock);
+
+    const { rerank } = await import("../src/embeddings/voyage.js");
+    await rerank("query", ["doc a"]);
+
+    expect(rerankFetchMock).toHaveBeenCalledWith(
+      "https://api.voyageai.com/v1/rerank",
+      expect.anything()
+    );
+  });
+
+  it("embed() and rerank() call fetch against a configured VOYAGE_BASE_URL", async () => {
+    process.env.VOYAGE_BASE_URL = "https://ai.mongodb.com";
+
+    const embedFetchMock = vi.fn(async () =>
+      fakeResponse(200, { data: [{ embedding: [0.1, 0.2], index: 0 }] })
+    );
+    vi.stubGlobal("fetch", embedFetchMock);
+
+    const { embed } = await import("../src/embeddings/voyage.js");
+    await embed(["hello"], "query");
+
+    expect(embedFetchMock).toHaveBeenCalledWith(
+      "https://ai.mongodb.com/v1/embeddings",
+      expect.anything()
+    );
+
+    const rerankFetchMock = vi.fn(async () =>
+      fakeResponse(200, { data: [{ index: 0, relevance_score: 0.9 }] })
+    );
+    vi.stubGlobal("fetch", rerankFetchMock);
+
+    const { rerank } = await import("../src/embeddings/voyage.js");
+    await rerank("query", ["doc a"]);
+
+    expect(rerankFetchMock).toHaveBeenCalledWith(
+      "https://ai.mongodb.com/v1/rerank",
+      expect.anything()
+    );
+  });
+});
+
+describe("rerank", () => {
+  it("aborts and eventually rejects instead of hanging when the request never settles", async () => {
+    vi.useFakeTimers();
+    // Same hung-response simulation as embed()'s abort test: the promise only
+    // settles once the caller's AbortSignal fires.
+    const fetchMock = vi.fn((_url: string, options?: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => {
+          reject(new Error("The operation was aborted."));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerank } = await import("../src/embeddings/voyage.js");
+    const resultPromise = rerank("query", ["doc a", "doc b"]);
+    resultPromise.catch(() => {});
+
+    await vi.runAllTimersAsync();
+
+    await expect(resultPromise).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

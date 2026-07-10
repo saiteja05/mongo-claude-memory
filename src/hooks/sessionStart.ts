@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getBriefs, type BriefResult } from "../briefs/fetchBrief.js";
+import { closeDb } from "../db/client.js";
 
 export interface SessionStartInput {
   session_id: string;
@@ -63,9 +64,12 @@ async function readStdin(): Promise<string> {
  * be visible as hook errors).
  */
 async function main(): Promise<void> {
+  // Everything routes through a single process.exit(0) at the very end (in
+  // the finally block), never an early process.exit() inside try: calling
+  // process.exit() terminates the process immediately and skips any
+  // subsequent finally, so closeDb() would never run otherwise.
   try {
     if (!process.env.MDB_MCP_CONNECTION_STRING && !process.env.MEMORY_MONGODB_URI) {
-      process.exit(0);
       return;
     }
 
@@ -81,7 +85,6 @@ async function main(): Promise<void> {
     });
 
     if (!context) {
-      process.exit(0);
       return;
     }
 
@@ -93,8 +96,14 @@ async function main(): Promise<void> {
         },
       })
     );
-    process.exit(0);
   } catch {
+    // Fail open: never let a hook throw.
+  } finally {
+    try {
+      await closeDb();
+    } catch {
+      // Ignore close errors; the process is exiting regardless.
+    }
     process.exit(0);
   }
 }

@@ -50,6 +50,25 @@ async function ensureBeliefsCompoundIndex(db: Db): Promise<void> {
   console.log(`[indexes] created compound index "${BELIEFS}.project_scope_status"`);
 }
 
+async function ensureBeliefsTtlIndex(db: Db): Promise<void> {
+  const collection = db.collection(BELIEFS);
+  const existing = await collection.indexes();
+  const found = existing.find((idx) => idx.name === "archived_tombstoned_ttl");
+  if (found) {
+    console.log(`[indexes] "${BELIEFS}.archived_tombstoned_ttl" already exists, skipping`);
+    return;
+  }
+  await collection.createIndex(
+    { updated_at: 1 },
+    {
+      name: "archived_tombstoned_ttl",
+      expireAfterSeconds: 7776000,
+      partialFilterExpression: { status: { $in: ["archived", "tombstoned"] } },
+    }
+  );
+  console.log(`[indexes] created TTL index "${BELIEFS}.archived_tombstoned_ttl"`);
+}
+
 async function ensureSearchIndex(
   db: Db,
   collectionName: string,
@@ -88,6 +107,7 @@ export async function setupIndexes(): Promise<void> {
 
   await ensureTtlIndex(db);
   await ensureBeliefsCompoundIndex(db);
+  await ensureBeliefsTtlIndex(db);
 
   await ensureSearchIndex(db, BELIEFS, "beliefs_vec", "vectorSearch", {
     fields: [

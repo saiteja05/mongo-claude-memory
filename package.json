@@ -7,10 +7,15 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "setup:indexes": "node dist/db/setupIndexes.js"
+    "setup:indexes": "node dist/db/setupIndexes.js",
+    "consolidate": "node dist/consolidation/cli.js",
+    "mcp": "node dist/mcp/server.js"
   },
   "dependencies": {
-    "mongodb": "^6.10.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.1084.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "mongodb": "^6.10.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
