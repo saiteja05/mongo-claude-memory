@@ -1,8 +1,10 @@
 import type { Db, Document } from "mongodb";
 import { BELIEFS } from "../db/schema.js";
 import { embed as voyageEmbed, rerank as voyageRerank } from "../embeddings/voyage.js";
+import { loadConfig } from "../config.js";
 
 const VECTOR_INDEX = "beliefs_vec"; // matches setupIndexes.ts (Phase 0)
+const VECTOR_INDEX_AUTO = "beliefs_vec_auto"; // matches setupIndexes.ts autoEmbed index
 const TEXT_INDEX = "beliefs_text"; // matches setupIndexes.ts (Phase 0)
 const RERANK_MODEL = "rerank-2.5-lite";
 const CANDIDATE_LIMIT = 50;
@@ -210,6 +212,82 @@ export function buildVectorOnlyPipeline(
   ];
 }
 
+/**
+ * Atlas autoEmbed variant of buildFullPipeline (config.embeddingMode ===
+ * "auto"): no app-computed query embedding, Atlas embeds params.query
+ * server-side against the beliefs_vec_auto index's "text" path.
+ */
+export function buildFullPipelineAuto(
+  query: string,
+  project: string,
+  model: string,
+  scope?: string
+): Document[] {
+  return [
+    {
+      $rankFusion: {
+        input: {
+          pipelines: {
+            vector: [
+              {
+                $vectorSearch: {
+                  index: VECTOR_INDEX_AUTO,
+                  path: "text",
+                  query: { text: query },
+                  model,
+                  filter: statusProjectFilter(project, scope),
+                  numCandidates: VECTOR_NUM_CANDIDATES,
+                  limit: CANDIDATE_LIMIT,
+                },
+              },
+            ],
+            text: [
+              {
+                $search: {
+                  index: TEXT_INDEX,
+                  compound: {
+                    must: [{ text: { query, path: "text" } }],
+                    filter: searchCompoundFilter(project, scope),
+                  },
+                },
+              },
+              { $limit: CANDIDATE_LIMIT },
+            ],
+          },
+        },
+        combination: { weights: { vector: 2, text: 1 } },
+        scoreDetails: true,
+      },
+    },
+    { $addFields: { fusionScore: { $meta: "score" } } },
+    { $limit: CANDIDATE_LIMIT },
+  ];
+}
+
+/** Atlas autoEmbed variant of buildVectorOnlyPipeline. */
+export function buildVectorOnlyPipelineAuto(
+  query: string,
+  project: string,
+  model: string,
+  scope?: string
+): Document[] {
+  return [
+    {
+      $vectorSearch: {
+        index: VECTOR_INDEX_AUTO,
+        path: "text",
+        query: { text: query },
+        model,
+        filter: statusProjectFilter(project, scope),
+        numCandidates: VECTOR_NUM_CANDIDATES,
+        limit: CANDIDATE_LIMIT,
+      },
+    },
+    { $addFields: { fusionScore: { $meta: "vectorSearchScore" } } },
+    { $limit: CANDIDATE_LIMIT },
+  ];
+}
+
 interface RerankOutcome {
   docs: Document[];
   reranked: boolean;
@@ -304,6 +382,62 @@ async function runBasePipeline(
   }
 }
 
+/**
+ * Atlas autoEmbed variant of runBasePipeline (config.embeddingMode ===
+ * "auto"): no query embedding to compute or check for null, since Atlas
+ * embeds params.query server-side; always attempts the full autoEmbed
+ * pipeline first, with the same full -> vector-only -> text-only ->
+ * empty+degraded fallback ladder.
+ */
+async function runBasePipelineAuto(
+  db: Db,
+  query: string,
+  project: string,
+  scope: string | undefined,
+  model: string,
+  aggregate: AggregateFn
+): Promise<{
+  docs: Document[];
+  pipeline: Document[];
+  path: "full" | "vector-only" | "text-only";
+  degraded: string | null;
+} | null> {
+  const fullPipeline = buildFullPipelineAuto(query, project, model, scope);
+  try {
+    const docs = await aggregate(db, fullPipeline);
+    return { docs, pipeline: fullPipeline, path: "full", degraded: null };
+  } catch (err) {
+    console.error(
+      `[memorySearch] full autoEmbed $rankFusion pipeline failed, falling back to vector-only: ${errMsg(err)}`
+    );
+    const vectorPipeline = buildVectorOnlyPipelineAuto(query, project, model, scope);
+    try {
+      const docs = await aggregate(db, vectorPipeline);
+      return {
+        docs,
+        pipeline: vectorPipeline,
+        path: "vector-only",
+        degraded: "vector-only: Atlas Search unavailable",
+      };
+    } catch (err2) {
+      console.error(`[memorySearch] autoEmbed vector-only fallback failed, falling back to text-only: ${errMsg(err2)}`);
+      const textPipeline = buildTextOnlyPipeline(query, project, scope);
+      try {
+        const docs = await aggregate(db, textPipeline);
+        return {
+          docs,
+          pipeline: textPipeline,
+          path: "text-only",
+          degraded: "text-only: vector search unavailable",
+        };
+      } catch (err3) {
+        console.error(`[memorySearch] text-only pipeline also failed: ${errMsg(err3)}`);
+        return null;
+      }
+    }
+  }
+}
+
 function toResultItem(doc: Document, scoreField: string): MemorySearchResultItem {
   const rawScore = doc[scoreField];
   return {
@@ -334,17 +468,27 @@ export async function runMemorySearch(
     ...deps,
   };
 
+  const config = loadConfig();
   const limit = params.limit ?? DEFAULT_RESULT_LIMIT;
-  const queryVector = await computeQueryEmbedding(params.query, embedFn);
 
-  const base = await runBasePipeline(
-    db,
-    params.query,
-    queryVector,
-    params.project,
-    params.scope,
-    aggregate
-  );
+  const base =
+    config.embeddingMode === "auto"
+      ? await runBasePipelineAuto(
+          db,
+          params.query,
+          params.project,
+          params.scope,
+          config.voyageModel,
+          aggregate
+        )
+      : await runBasePipeline(
+          db,
+          params.query,
+          await computeQueryEmbedding(params.query, embedFn),
+          params.project,
+          params.scope,
+          aggregate
+        );
 
   if (!base) {
     return {
@@ -360,7 +504,7 @@ export async function runMemorySearch(
   let scoreField: string;
   let degraded = baseDegraded;
 
-  if (eligibleForNativeRerank && rerankAvailable !== false) {
+  if (eligibleForNativeRerank) {
     const rerankPipeline: Document[] = [
       ...basePipeline,
       {
@@ -374,24 +518,49 @@ export async function runMemorySearch(
       { $addFields: { rerankScore: { $meta: "score" } } },
       { $limit: limit },
     ];
-    try {
-      finalDocs = await aggregate(db, rerankPipeline);
-      rerankAvailable = true;
-      scoreField = "rerankScore";
-    } catch (err) {
-      console.error(
-        `[memorySearch] native $rerank unavailable, caching and falling back to Voyage rerank: ${errMsg(err)}`
-      );
-      rerankAvailable = false;
+
+    if (config.rerankMode === "appside") {
+      // Never attempt native $rerank: go straight to the Voyage rerank API.
+      const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
+      finalDocs = fallback.docs;
+      scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
+    } else if (config.rerankMode === "native") {
+      // Always attempt native $rerank; on failure, never fall back to the
+      // Voyage rerank API, just return the fused results unranked.
+      try {
+        finalDocs = await aggregate(db, rerankPipeline);
+        scoreField = "rerankScore";
+      } catch (err) {
+        console.error(
+          `[memorySearch] native $rerank unavailable (rerankMode=native, no Voyage fallback): ${errMsg(err)}`
+        );
+        finalDocs = baseResults.slice(0, limit);
+        scoreField = "fusionScore";
+        degraded = degraded ?? "unranked: native rerank unavailable";
+      }
+    } else if (rerankAvailable !== false) {
+      // rerankMode "auto": probe native $rerank, cache the result, and fall
+      // back to the Voyage rerank API on failure.
+      try {
+        finalDocs = await aggregate(db, rerankPipeline);
+        rerankAvailable = true;
+        scoreField = "rerankScore";
+      } catch (err) {
+        console.error(
+          `[memorySearch] native $rerank unavailable, caching and falling back to Voyage rerank: ${errMsg(err)}`
+        );
+        rerankAvailable = false;
+        const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
+        finalDocs = fallback.docs;
+        scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
+      }
+    } else {
+      // rerankMode "auto", rerankAvailable is cached false: skip straight to
+      // the fallback.
       const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
       finalDocs = fallback.docs;
       scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
     }
-  } else if (eligibleForNativeRerank) {
-    // rerankAvailable is cached false: skip straight to the fallback.
-    const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
-    finalDocs = fallback.docs;
-    scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
   } else {
     // text-only path: rerank is not attempted (DESIGN.md instructs reranking
     // only for the full or vector-derived pipeline).

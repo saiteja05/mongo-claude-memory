@@ -19,6 +19,11 @@ export interface RunConsolidationDeps {
   reclaimAfterMs: number;
   beliefsContextLimit: number;
   dedupeSimilarityThreshold: number;
+  // "auto" (Atlas autoEmbed) skips the embed() call entirely for belief
+  // documents, since Atlas computes the embedding server-side from the
+  // "text" path. Optional, defaulting to "appside" (current behavior), so
+  // existing callers/tests that omit it are unaffected.
+  embeddingMode?: "appside" | "auto";
   reclaimStale: (db: Db, project: string, reclaimAfterMs: number) => Promise<number>;
   acquireLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
   renewLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
@@ -39,7 +44,7 @@ export interface RunConsolidationDeps {
     db: Db,
     project: string,
     candidate: CandidateFact,
-    embedding: number[],
+    embedding: number[] | null,
     threshold: number
   ) => Promise<UpsertBeliefResult>;
   compileBrief: (db: Db, scopeKey: string) => Promise<void>;
@@ -134,7 +139,11 @@ export async function runConsolidation(
         continue;
       }
 
-      const [embedding] = await deps.embed([candidate.text]);
+      // In "auto" (Atlas autoEmbed) mode, skip the embed() call entirely:
+      // Atlas computes and stores the embedding server-side from the belief
+      // doc's "text" path, so no app-side Voyage call is needed here.
+      const embedding =
+        deps.embeddingMode === "auto" ? null : (await deps.embed([candidate.text]))[0];
       await deps.upsertBelief(db, project, candidate, embedding, deps.dedupeSimilarityThreshold);
       processed++;
       if (candidate.scope === "core") {

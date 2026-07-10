@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Db } from "mongodb";
 import { getDb, closeDb } from "./client.js";
+import { loadConfig } from "../config.js";
 import { OBSERVATIONS, BELIEFS, BRIEFS, LOCKS } from "./schema.js";
 
 /**
@@ -99,6 +100,7 @@ async function ensureSearchIndex(
 
 export async function setupIndexes(): Promise<void> {
   const db = await getDb();
+  const config = loadConfig();
 
   await ensureCollection(db, OBSERVATIONS);
   await ensureCollection(db, BELIEFS);
@@ -117,6 +119,26 @@ export async function setupIndexes(): Promise<void> {
         numDimensions: 1024,
         similarity: "cosine",
         quantization: "scalar",
+      },
+      { type: "filter", path: "project" },
+      { type: "filter", path: "scope" },
+      { type: "filter", path: "status" },
+    ],
+  });
+
+  // Coexists with beliefs_vec (appside): this index backs the fully-managed
+  // Atlas autoEmbed mode (config.embeddingMode === "auto"), where Atlas
+  // computes and stores the embedding server-side from the "text" path
+  // instead of the app calling Voyage directly. Both modes' indexes are
+  // always created so a deployment can switch EMBEDDING_MODE without a
+  // separate index-setup step.
+  await ensureSearchIndex(db, BELIEFS, "beliefs_vec_auto", "vectorSearch", {
+    fields: [
+      {
+        type: "autoEmbed",
+        path: "text",
+        model: config.voyageModel,
+        modality: "text",
       },
       { type: "filter", path: "project" },
       { type: "filter", path: "scope" },

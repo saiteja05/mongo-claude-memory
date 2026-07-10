@@ -20,6 +20,8 @@ const ENV_KEYS = [
   "CONSOLIDATION_RECLAIM_MS",
   "CONSOLIDATION_BELIEFS_CONTEXT_LIMIT",
   "CONSOLIDATION_DEDUPE_THRESHOLD",
+  "EMBEDDING_MODE",
+  "RERANK_MODE",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -278,5 +280,73 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.beliefsContextLimit).toBe(5);
+  });
+
+  it("defaults embeddingMode to appside when EMBEDDING_MODE is unset", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.embeddingMode).toBe("appside");
+  });
+
+  it("selects embeddingMode auto when EMBEDDING_MODE=auto", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.EMBEDDING_MODE = "auto";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.embeddingMode).toBe("auto");
+  });
+
+  it("falls back to embeddingMode appside for any unrecognized EMBEDDING_MODE value", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.EMBEDDING_MODE = "bogus";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.embeddingMode).toBe("appside");
+  });
+
+  it("defaults rerankMode to auto when RERANK_MODE is unset", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.rerankMode).toBe("auto");
+  });
+
+  it("selects rerankMode native when RERANK_MODE=native", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.RERANK_MODE = "native";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.rerankMode).toBe("native");
+  });
+
+  it("selects rerankMode appside when RERANK_MODE=appside", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.RERANK_MODE = "appside";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.rerankMode).toBe("appside");
+  });
+
+  it("falls back to rerankMode auto for any unrecognized RERANK_MODE value", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.RERANK_MODE = "bogus";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.rerankMode).toBe("auto");
   });
 });

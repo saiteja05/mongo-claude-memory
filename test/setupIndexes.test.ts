@@ -1,5 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { BELIEFS as BELIEFS_NAME } from "../src/db/schema.js";
+
+let savedUri: string | undefined;
+let savedMdbUri: string | undefined;
 
 interface FakeState {
   existingCollections: Set<string>;
@@ -58,6 +61,20 @@ function makeFakeDb(state: FakeState, calls: string[]) {
 beforeEach(() => {
   vi.resetModules();
   vi.doUnmock("../src/db/client.js");
+  // setupIndexes() now calls loadConfig() (for config.voyageModel, used by
+  // the beliefs_vec_auto autoEmbed index definition); pin a deterministic
+  // connection string rather than relying on the ambient shell env.
+  savedUri = process.env.MEMORY_MONGODB_URI;
+  savedMdbUri = process.env.MDB_MCP_CONNECTION_STRING;
+  process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+  delete process.env.MDB_MCP_CONNECTION_STRING;
+});
+
+afterEach(() => {
+  if (savedUri === undefined) delete process.env.MEMORY_MONGODB_URI;
+  else process.env.MEMORY_MONGODB_URI = savedUri;
+  if (savedMdbUri === undefined) delete process.env.MDB_MCP_CONNECTION_STRING;
+  else process.env.MDB_MCP_CONNECTION_STRING = savedMdbUri;
 });
 
 describe("setupIndexes", () => {
@@ -84,6 +101,7 @@ describe("setupIndexes", () => {
     expect(calls).toContain("createIndex:observations:expiresAt_ttl");
     expect(calls).toContain("createIndex:beliefs:project_scope_status");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_vec");
+    expect(calls).toContain("createSearchIndex:beliefs:beliefs_vec_auto");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_text");
   });
 
@@ -96,7 +114,11 @@ describe("setupIndexes", () => {
         "beliefs:project_scope_status",
         "beliefs:archived_tombstoned_ttl",
       ]),
-      existingSearchIndexNames: new Set(["beliefs:beliefs_vec", "beliefs:beliefs_text"]),
+      existingSearchIndexNames: new Set([
+        "beliefs:beliefs_vec",
+        "beliefs:beliefs_vec_auto",
+        "beliefs:beliefs_text",
+      ]),
       searchIndexesUnsupported: false,
     };
     vi.doMock("../src/db/client.js", () => ({
@@ -196,5 +218,53 @@ describe("setupIndexes", () => {
     await expect(setupIndexes()).resolves.toBeUndefined();
 
     expect(calls.some((c) => c.startsWith("createSearchIndex:"))).toBe(false);
+  });
+
+  it("creates beliefs_vec_auto with the autoEmbed field shape on path \"text\", using config.voyageModel", async () => {
+    const calls: string[] = [];
+    const state: FakeState = {
+      existingCollections: new Set(["observations", "beliefs", "briefs", "locks"]),
+      existingIndexNames: new Set([
+        "observations:expiresAt_ttl",
+        "beliefs:project_scope_status",
+        "beliefs:archived_tombstoned_ttl",
+      ]),
+      existingSearchIndexNames: new Set(["beliefs:beliefs_vec", "beliefs:beliefs_text"]),
+      searchIndexesUnsupported: false,
+    };
+    const createSearchIndexCalls: Array<{ name: string; type: string; definition: unknown }> = [];
+    const db = makeFakeDb(state, calls);
+    const beliefsCollection = db.collection(BELIEFS_NAME);
+    const originalCreateSearchIndex = beliefsCollection.createSearchIndex.bind(beliefsCollection);
+    beliefsCollection.createSearchIndex = async (def: {
+      name: string;
+      type: string;
+      definition: unknown;
+    }) => {
+      createSearchIndexCalls.push(def);
+      return originalCreateSearchIndex(def);
+    };
+    vi.doMock("../src/db/client.js", () => ({
+      getDb: async () => ({
+        ...db,
+        collection: (name: string) => (name === BELIEFS_NAME ? beliefsCollection : db.collection(name)),
+      }),
+      closeDb: async () => {},
+    }));
+
+    const { setupIndexes } = await import("../src/db/setupIndexes.js");
+    await setupIndexes();
+
+    const autoCall = createSearchIndexCalls.find((c) => c.name === "beliefs_vec_auto");
+    expect(autoCall).toBeDefined();
+    expect(autoCall?.type).toBe("vectorSearch");
+    expect(autoCall?.definition).toEqual({
+      fields: [
+        { type: "autoEmbed", path: "text", model: "voyage-4", modality: "text" },
+        { type: "filter", path: "project" },
+        { type: "filter", path: "scope" },
+        { type: "filter", path: "status" },
+      ],
+    });
   });
 });

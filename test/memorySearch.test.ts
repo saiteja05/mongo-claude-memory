@@ -1,6 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const fakeDb = {} as any;
+
+const ENV_KEYS = [
+  "MDB_MCP_CONNECTION_STRING",
+  "MEMORY_MONGODB_URI",
+  "EMBEDDING_MODE",
+  "RERANK_MODE",
+] as const;
+
+let savedEnv: Record<string, string | undefined>;
 
 function hasStage(pipeline: any[], key: string): boolean {
   return pipeline.some((stage) => Object.prototype.hasOwnProperty.call(stage, key));
@@ -17,6 +26,22 @@ const baseDocs = [
 
 beforeEach(() => {
   vi.resetModules();
+  savedEnv = {};
+  for (const key of ENV_KEYS) {
+    savedEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+  process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+});
+
+afterEach(() => {
+  for (const key of ENV_KEYS) {
+    if (savedEnv[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = savedEnv[key];
+    }
+  }
 });
 
 describe("runMemorySearch", () => {
@@ -238,5 +263,177 @@ describe("runMemorySearch", () => {
 
     expect(updateUseCount).toHaveBeenCalledTimes(1);
     expect(updateUseCount.mock.calls[0][1]).toEqual(["b1", "b2"]);
+  });
+
+  describe("embeddingMode auto", () => {
+    it("skips computeQueryEmbedding entirely and builds query:{text} pipelines against beliefs_vec_auto", async () => {
+      process.env.EMBEDDING_MODE = "auto";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+      const rerank = vi.fn(async () => []);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rerank")) return baseDocs.map((d) => ({ ...d, rerankScore: 0.9 }));
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "tabs vs spaces", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(embed).not.toHaveBeenCalled();
+      const basePipeline = aggregate.mock.calls[0][1];
+      const vectorArm = basePipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch;
+      expect(vectorArm).toMatchObject({
+        index: "beliefs_vec_auto",
+        path: "text",
+        query: { text: "tabs vs spaces" },
+        model: "voyage-4",
+      });
+      expect(vectorArm.queryVector).toBeUndefined();
+      expect(result.degraded).toBeNull();
+      expect(result.results).toHaveLength(2);
+    });
+
+    it("uses query:{text} in the vector-only autoEmbed fallback when the full pipeline fails", async () => {
+      process.env.EMBEDDING_MODE = "auto";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+      const rerank = vi.fn(async () => []);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rankFusion")) {
+          throw new Error("Unrecognized pipeline stage name: '$rankFusion'");
+        }
+        if (hasStage(pipeline, "$rerank")) {
+          throw new Error("Unrecognized pipeline stage name: '$rerank'");
+        }
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "tabs vs spaces", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(result.degraded).toBe("vector-only: Atlas Search unavailable");
+      const successfulBaseCall = aggregate.mock.calls.find(
+        (call) => !hasStage(call[1], "$rankFusion") && !hasStage(call[1], "$rerank")
+      );
+      expect(successfulBaseCall).toBeDefined();
+      expect(successfulBaseCall![1][0].$vectorSearch).toMatchObject({
+        index: "beliefs_vec_auto",
+        path: "text",
+        query: { text: "tabs vs spaces" },
+      });
+    });
+
+    it("falls back to text-only when both autoEmbed pipelines fail, never calling embed", async () => {
+      process.env.EMBEDDING_MODE = "auto";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => []);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rankFusion")) throw new Error("no rankFusion");
+        if (hasStage(pipeline, "$vectorSearch")) throw new Error("no vectorSearch");
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "tabs vs spaces", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(result.degraded).toBe("text-only: vector search unavailable");
+      expect(result.results).toHaveLength(2);
+    });
+  });
+
+  describe("rerankMode", () => {
+    it("native: never falls back to the Voyage rerank API when native $rerank fails", async () => {
+      process.env.RERANK_MODE = "native";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => []);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rerank")) throw new Error("native rerank unavailable");
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "q", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(rerank).not.toHaveBeenCalled();
+      expect(result.degraded).toBeTruthy();
+      expect(result.results).toHaveLength(2);
+    });
+
+    it("native: uses the native $rerank result when it succeeds", async () => {
+      process.env.RERANK_MODE = "native";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => []);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rerank")) return baseDocs.map((d) => ({ ...d, rerankScore: 0.9 }));
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "q", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(rerank).not.toHaveBeenCalled();
+      expect(result.degraded).toBeNull();
+      expect(result.results[0].score).toBe(0.9);
+    });
+
+    it("appside: never issues a $rerank stage, always goes straight to the Voyage rerank API", async () => {
+      process.env.RERANK_MODE = "appside";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => [
+        { index: 1, relevance_score: 0.99 },
+        { index: 0, relevance_score: 0.5 },
+      ]);
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        // If a $rerank stage were ever issued, this test should fail loudly
+        // rather than silently succeeding on a mocked response.
+        if (hasStage(pipeline, "$rerank")) {
+          throw new Error("appside mode must never issue a $rerank stage");
+        }
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "q", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(aggregate).toHaveBeenCalledTimes(1);
+      expect(rerank).toHaveBeenCalledTimes(1);
+      expect(result.results[0]._id).toBe("b2");
+    });
   });
 });

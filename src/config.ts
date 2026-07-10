@@ -22,6 +22,8 @@ export interface Config {
   reclaimAfterMs: number;
   beliefsContextLimit: number;
   dedupeSimilarityThreshold: number;
+  embeddingMode: "appside" | "auto";
+  rerankMode: "auto" | "native" | "appside";
 }
 
 function envInt(name: string, fallback: number): number {
@@ -81,5 +83,16 @@ export function loadConfig(): Config {
     reclaimAfterMs: envInt("CONSOLIDATION_RECLAIM_MS", 600000),
     beliefsContextLimit: envInt("CONSOLIDATION_BELIEFS_CONTEXT_LIMIT", 30),
     dedupeSimilarityThreshold: envFloat("CONSOLIDATION_DEDUPE_THRESHOLD", 0.93),
+    // "auto" selects Atlas autoEmbed (the server computes and stores the
+    // embedding from the "text" path, no app-side Voyage call); anything
+    // else, including unset, keeps the appside (current) behavior.
+    embeddingMode: process.env.EMBEDDING_MODE === "auto" ? "auto" : "appside",
+    // "native" always uses the Atlas $rerank stage, "appside" always uses
+    // the Voyage rerank API, "auto" (default) probes native and caches the
+    // result, falling back to Voyage rerank on failure.
+    rerankMode:
+      process.env.RERANK_MODE === "native" || process.env.RERANK_MODE === "appside"
+        ? process.env.RERANK_MODE
+        : "auto",
   };
 }

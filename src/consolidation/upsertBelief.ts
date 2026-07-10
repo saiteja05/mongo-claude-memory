@@ -4,6 +4,7 @@ import { BELIEFS } from "../db/schema.js";
 import type { CandidateFact } from "./extractFacts.js";
 
 const BELIEFS_VECTOR_INDEX = "beliefs_vec"; // matches setupIndexes.ts (Phase 0)
+const BELIEFS_VECTOR_INDEX_AUTO = "beliefs_vec_auto"; // matches setupIndexes.ts autoEmbed index
 const VOYAGE_MODEL_VERSION = "voyage-4";
 
 export interface SimilarBelief {
@@ -17,6 +18,21 @@ export type UpsertAction = "insert" | "update" | "supersede";
 export interface UpsertBeliefResult {
   beliefId: string;
   action: UpsertAction;
+}
+
+/**
+ * "appside" (default): the caller has already computed a Voyage embedding
+ * and findSimilarBelief/upsertBelief run the dedupe $vectorSearch against
+ * beliefs_vec with that queryVector, writing the embedding onto the doc.
+ * "auto": Atlas autoEmbed manages embeddings server-side; the dedupe
+ * $vectorSearch runs against beliefs_vec_auto with a text query instead of a
+ * vector, and no embedding field is written onto the doc.
+ */
+export interface EmbeddingModeOptions {
+  mode?: "appside" | "auto";
+  model?: string;
+  /** The candidate's text, used as the $vectorSearch text query when mode is "auto". */
+  queryText?: string;
 }
 
 /**
@@ -39,26 +55,38 @@ export async function findSimilarBelief(
   project: string,
   scope: CandidateFact["scope"],
   embedding: number[],
-  threshold: number
+  threshold: number,
+  options: EmbeddingModeOptions = {}
 ): Promise<SimilarBelief | null> {
   const filter: Document =
     scope === "core"
       ? { scope: "core", status: "active" }
       : { project, scope, status: "active" };
 
-  const results = await db
-    .collection<Document>(BELIEFS)
-    .aggregate([
-      {
-        $vectorSearch: {
+  const vectorSearchStage =
+    options.mode === "auto"
+      ? {
+          index: BELIEFS_VECTOR_INDEX_AUTO,
+          path: "text",
+          query: { text: options.queryText ?? "" },
+          model: options.model ?? VOYAGE_MODEL_VERSION,
+          filter,
+          numCandidates: 100,
+          limit: 1,
+        }
+      : {
           index: BELIEFS_VECTOR_INDEX,
           path: "embedding",
           queryVector: embedding,
           filter,
           numCandidates: 100,
           limit: 1,
-        },
-      },
+        };
+
+  const results = await db
+    .collection<Document>(BELIEFS)
+    .aggregate([
+      { $vectorSearch: vectorSearchStage },
       {
         $project: { text: 1, score: { $meta: "vectorSearchScore" } },
       },
@@ -89,16 +117,15 @@ function toFilterId(id: string): ObjectId {
 function newBeliefDoc(
   project: string,
   candidate: CandidateFact,
-  embedding: number[],
+  embedding: number[] | null,
   now: Date,
   supersedes: string | undefined
 ): Document {
-  return {
+  const doc: Document = {
     project,
     scope: candidate.scope,
     type: candidate.type,
     text: candidate.text,
-    embedding,
     model_version: VOYAGE_MODEL_VERSION,
     importance: candidate.importance,
     use_count: 0,
@@ -110,6 +137,13 @@ function newBeliefDoc(
     supersedes: supersedes ?? null,
     observation_ids: candidate.observation_ids,
   };
+  // embedding is omitted entirely (not even set to null/undefined) when Atlas
+  // autoEmbed manages it server-side (embeddingMode "auto"), matching
+  // schema.ts's "omitted when autoEmbed manages it" doc comment.
+  if (embedding !== null) {
+    doc.embedding = embedding;
+  }
+  return doc;
 }
 
 /**
@@ -122,8 +156,9 @@ export async function upsertBelief(
   db: Db,
   project: string,
   candidate: CandidateFact,
-  embedding: number[],
-  dedupeSimilarityThreshold: number
+  embedding: number[] | null,
+  dedupeSimilarityThreshold: number,
+  options: EmbeddingModeOptions = {}
 ): Promise<UpsertBeliefResult> {
   const collection = db.collection<Document>(BELIEFS);
   const now = new Date();
@@ -154,8 +189,9 @@ export async function upsertBelief(
     db,
     project,
     candidate.scope,
-    embedding,
-    dedupeSimilarityThreshold
+    embedding ?? [],
+    dedupeSimilarityThreshold,
+    { mode: options.mode, model: options.model, queryText: candidate.text }
   );
 
   if (similar) {

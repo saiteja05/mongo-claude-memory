@@ -40,6 +40,7 @@ function buildDeps(config: Config, runId: string): RunConsolidationDeps {
     reclaimAfterMs: config.reclaimAfterMs,
     beliefsContextLimit: config.beliefsContextLimit,
     dedupeSimilarityThreshold: config.dedupeSimilarityThreshold,
+    embeddingMode: config.embeddingMode,
     reclaimStale,
     acquireLease,
     renewLease,
@@ -48,7 +49,11 @@ function buildDeps(config: Config, runId: string): RunConsolidationDeps {
     fetchExistingBeliefs,
     extractFacts,
     embed: (texts: string[]) => embed(texts, "document"),
-    upsertBelief,
+    upsertBelief: (db, project, candidate, embedding, threshold) =>
+      upsertBelief(db, project, candidate, embedding, threshold, {
+        mode: config.embeddingMode,
+        model: config.voyageModel,
+      }),
     compileBrief,
     markConsolidated,
   };
