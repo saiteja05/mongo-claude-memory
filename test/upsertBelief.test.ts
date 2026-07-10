@@ -225,4 +225,76 @@ describe("upsertBelief", () => {
       status: "active",
     });
   });
+  describe("embeddingMode auto", () => {
+    it("findSimilarBelief runs the dedupe $vectorSearch against beliefs_vec_auto with a text query instead of a queryVector", async () => {
+      const { db, aggregate } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      await findSimilarBelief(db as any, "proj", "project", [0.1, 0.2], 0.93, {
+        mode: "auto",
+        model: "voyage-4",
+        queryText: "the user prefers tabs",
+      });
+
+      const [pipeline] = aggregate.mock.calls[0];
+      expect((pipeline[0] as any).$vectorSearch).toMatchObject({
+        index: "beliefs_vec_auto",
+        path: "text",
+        query: { text: "the user prefers tabs" },
+        model: "voyage-4",
+      });
+      expect((pipeline[0] as any).$vectorSearch.queryVector).toBeUndefined();
+    });
+
+    it("upsertBelief in auto mode uses candidate.text as the dedupe query and passes the mode/model through", async () => {
+      const { db, aggregate } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      const candidate = makeCandidate({ text: "the user prefers tabs" });
+      await upsertBelief(db as any, "proj", candidate, null, 0.93, {
+        mode: "auto",
+        model: "voyage-4",
+      });
+
+      const [pipeline] = aggregate.mock.calls[0];
+      expect((pipeline[0] as any).$vectorSearch).toMatchObject({
+        index: "beliefs_vec_auto",
+        query: { text: "the user prefers tabs" },
+        model: "voyage-4",
+      });
+    });
+
+    it("does not write an embedding field on insert when embeddingMode is auto", async () => {
+      const { db, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      const candidate = makeCandidate();
+      await upsertBelief(db as any, "proj", candidate, null, 0.93, { mode: "auto" });
+
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      const [doc] = insertOne.mock.calls[0];
+      expect(Object.prototype.hasOwnProperty.call(doc, "embedding")).toBe(false);
+    });
+
+    it("does not write an embedding field on the supersede insert path when embeddingMode is auto", async () => {
+      const oldId = new ObjectId().toString();
+      const { db, insertOne } = makeFakeBeliefsDb({
+        findOneResult: { _id: oldId, project: "proj", status: "active", text: "outdated fact" },
+      });
+
+      const candidate = makeCandidate({ text: "corrected fact", supersedes_belief_id: oldId });
+      await upsertBelief(db as any, "proj", candidate, null, 0.93, { mode: "auto" });
+
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      const [doc] = insertOne.mock.calls[0];
+      expect(Object.prototype.hasOwnProperty.call(doc, "embedding")).toBe(false);
+    });
+
+    it("still writes an embedding field on insert in the default appside mode", async () => {
+      const { db, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      const candidate = makeCandidate();
+      await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93);
+
+      const [doc] = insertOne.mock.calls[0];
+      expect(doc.embedding).toEqual([0.1, 0.2]);
+    });
+  });
 });

@@ -60,6 +60,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     sessionEndTimeoutMs: 5000,
     anthropicApiKey: "anthropic-key",
     anthropicModel: "claude-sonnet-5",
+    llmProvider: "anthropic",
     leaseMs: 300000,
     claimBatchSize: 50,
     reclaimAfterMs: 600000,
@@ -133,6 +134,31 @@ describe("main (default consolidation path)", () => {
 
   it("skips the run cleanly (no crash) when ANTHROPIC_API_KEY is missing", async () => {
     loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+
+    setArgs("my-project");
+    await main();
+
+    expect(getDb).not.toHaveBeenCalled();
+    expect(runConsolidation).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("with llmProvider bedrock and no ANTHROPIC_API_KEY, proceeds past the gate (uses AWS credentials instead)", async () => {
+    loadConfig.mockReturnValue(makeConfig({ llmProvider: "bedrock", anthropicApiKey: undefined }));
+    const { db } = makeFakeDb();
+    getDb.mockResolvedValue(db);
+    runConsolidation.mockResolvedValue({ processed: 1, skipped: false });
+
+    setArgs("my-project");
+    await main();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(getDb).toHaveBeenCalled();
+    expect(runConsolidation).toHaveBeenCalledTimes(1);
+  });
+
+  it("with llmProvider anthropic (explicit) and no ANTHROPIC_API_KEY, still skips the run cleanly", async () => {
+    loadConfig.mockReturnValue(makeConfig({ llmProvider: "anthropic", anthropicApiKey: undefined }));
 
     setArgs("my-project");
     await main();

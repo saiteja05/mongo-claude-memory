@@ -94,8 +94,19 @@ async function ensureSearchIndex(
     return;
   }
 
-  await collection.createSearchIndex({ name, type, definition });
-  console.log(`[search indexes] requested creation of "${collectionName}.${name}" (type: ${type})`);
+  try {
+    await collection.createSearchIndex({ name, type, definition });
+    console.log(`[search indexes] requested creation of "${collectionName}.${name}" (type: ${type})`);
+  } catch (err) {
+    // createSearchIndex can fail for indexes that depend on preview features
+    // (e.g. autoEmbed for beliefs_vec_auto) not enabled on a given Atlas
+    // cluster. Log and continue so one unsupported index never blocks the
+    // remaining baseline indexes from being created.
+    console.log(
+      `[search indexes] could not create "${collectionName}.${name}" ` +
+        `(type: ${type}): ${err instanceof Error ? err.message : "unknown error"}`
+    );
+  }
 }
 
 export async function setupIndexes(): Promise<void> {

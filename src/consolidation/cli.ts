@@ -120,10 +120,14 @@ export async function main(): Promise<void> {
       return;
     }
 
-    if (!config.anthropicApiKey) {
+    if (config.llmProvider === "anthropic" && !config.anthropicApiKey) {
       // Mirrors how the rest of the system degrades when a credential is
-      // missing (DESIGN.md section 10): log clearly and exit cleanly.
-      console.error("[consolidate] ANTHROPIC_API_KEY is not configured; skipping consolidation run.");
+      // missing (DESIGN.md section 10): log clearly and exit cleanly. Only
+      // applies to the anthropic provider: a bedrock-configured machine uses
+      // AWS credentials instead and should not be gated on this check.
+      console.error(
+        "[consolidate] ANTHROPIC_API_KEY is not configured; skipping consolidation run. Set LLM_PROVIDER=bedrock to use AWS credentials instead."
+      );
       return;
     }
 
