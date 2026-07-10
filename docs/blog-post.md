@@ -33,6 +33,55 @@ memory_search("what did we decide about the login bug retries?")
 
 Capture everything, distill it offline, load a fixed small brief, search for the rest only when the task calls for it.
 
+## How it works
+
+The paragraph above is the summary. Here is the pipeline underneath it, in the order data actually flows.
+
+```
+Claude Code session
+   │            │              │
+SessionStart  UserPromptSubmit SessionEnd
+ (inject)      (# capture)     (transcript)
+   │            │              │
+   │            ▼              ▼
+   │      observations (append-only)  ◄── /remember, memory_write (MCP)
+   │            │
+   │            │  cron, every 15 min
+   │            ▼
+   │      consolidation (offline job)
+   │            │
+   │            ▼
+   │      beliefs (durable, ranked, deduped)
+   │            │
+   │            ▼
+   └─────► briefs (compiled, token-capped) ──► injected at SessionStart
+
+              memory_search / memory_write / memory_forget
+                     (MCP tools, on demand, any time)
+```
+
+**Capture.** Everything starts life as an observation, written cheap and dumb: no parsing, no judgment, just an append. Three hooks do this without you doing anything. `SessionStart` runs at the start, on compaction, and on resume, injecting the compiled brief as additional context, so compaction never wipes memory the way it wipes conversation history. `UserPromptSubmit` watches for prompts starting with `#`, the same convention Claude Code's own quick-add uses, and writes them as high-priority observations that never expire. `SessionEnd` captures the tail of the session transcript as one normal-priority observation for the consolidator to mine later. A `/remember` slash command and a `memory_write` MCP tool let you or Claude write a fact directly, mid-conversation. Every path lands in the same `observations` collection, and every hook fails open: if MongoDB is unreachable, slow, or misconfigured, the hook silently no-ops and exits clean. Memory can enrich a session; it can never break one.
+
+**Consolidation.** Observations are raw and redundant, so nothing durable is built from them directly. A separate job, on a schedule (every 15 minutes by default) or on demand, acquires a per-project lease so only one process ever consolidates a given project at a time, claims a batch of pending observations, and calls an LLM, either the Anthropic API directly or AWS Bedrock, switchable with one `LLM_PROVIDER` variable, with a forced tool call to extract candidate facts. Because observation text is untrusted transcript content, every extracted fact passes a deterministic deny-list before it can become a belief: no imperative-to-the-assistant phrasing, no tool or hook directives, nothing that reads like an instruction planted for a future session to obey. Facts that pass are embedded and vector-compared against existing beliefs, so a fact that already exists gets merged, or supersedes the old version, rather than filed as a duplicate. The job then recompiles whichever briefs changed. Every belief keeps its provenance, the run id and observation ids that produced it, so a bad run can be rolled back by run id alone.
+
+**Retrieval.** The brief covers the common case for free, at session start, with no search involved: a single indexed lookup. For anything that did not make the token-capped cut, `memory_search` is the on-demand path over MCP. It runs one aggregation: `$rankFusion` fuses a vector-search arm against belief embeddings with a BM25 full-text arm against belief text, weighted 2:1 toward the semantic match, so a paraphrase and an exact term both have a path to the right answer. The fused candidates are then optionally reranked, by a native Atlas `$rerank` stage when available or the Voyage rerank API otherwise, before the result is trimmed to the requested limit. None of this is allowed to throw: unavailable embedding falls back to text-only, unavailable Atlas Search falls back to vector-only, and if both fail the result is an explicit empty response with a reason string, never an error.
+
+**Two axes you can flip without migrating anything.** `EMBEDDING_MODE` chooses who computes the vectors: `appside` (default) has the application call Voyage's `voyage-4` model directly; `auto` hands that job to Atlas `autoEmbed`, embedding belief text server-side on write and query, so the app computes nothing. `RERANK_MODE` chooses who reranks: `auto` (default) prefers native Atlas `$rerank` and falls back to Voyage's API; `native` and `appside` pin one or the other. Both indexes exist from the start, so switching either mode later is a config change, not a migration.
+
+**Staying tidy without a cleanup script.** Raw observations expire on their own: a TTL index removes normal-priority ones after 30 days by default (the high-priority ones from `/remember` and `#` capture never expire). Forgetting a belief through `memory_forget` tombstones rather than deletes it, which removes it from the brief and search results immediately, and a separate TTL index hard-deletes it 90 days later.
+
+## Getting started
+
+Setup is a handful of environment variables and one index-creation step, not new infrastructure. Point `MDB_MCP_CONNECTION_STRING` (or `MEMORY_MONGODB_URI`) at an Atlas cluster, add a `VOYAGE_API_KEY` for embeddings and reranking (or set `VOYAGE_BASE_URL` to use an Atlas model API key instead of a separate Voyage account), and add `LLM_PROVIDER` plus either `ANTHROPIC_API_KEY` or AWS credentials for the consolidator's extraction step. `EMBEDDING_MODE` and `RERANK_MODE` are optional; the defaults work out of the box.
+
+```bash
+npm install
+npm run build
+node dist/db/setupIndexes.js
+```
+
+That last command creates the collections, the observation TTL index, the belief indexes, and both vector and text search indexes, safe to re-run at any time. From there, register the three hooks (`SessionStart`, `UserPromptSubmit`, `SessionEnd`) against their built `dist/` entry points, register the MCP server so `memory_search`, `memory_write`, and `memory_forget` are available as tools, and add a cron line for the consolidator, something like `*/15 * * * * node dist/consolidation/cli.js`. The README has the full environment variable reference and hook wiring.
+
 ## What this means for cost and context, in practice
 
 The old system billed you tokens for the entire memory folder, every session, regardless of whether the task needed any of it. This one does not scale that way.
