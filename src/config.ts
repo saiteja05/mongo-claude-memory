@@ -16,10 +16,12 @@ export interface Config {
   sessionEndTimeoutMs: number;
   anthropicApiKey: string | undefined;
   anthropicModel: string;
-  llmProvider: "anthropic" | "bedrock";
+  llmProvider: "anthropic" | "bedrock" | "ollama";
   llmTimeoutMs: number;
   bedrockModel: string;
   bedrockRegion: string;
+  ollamaBaseUrl: string;
+  ollamaModel: string;
   leaseMs: number;
   claimBatchSize: number;
   consolidationBatchMaxChars: number;
@@ -90,13 +92,23 @@ export function loadConfig(): Config {
     sessionEndTimeoutMs: envInt("SESSION_END_TIMEOUT_MS", 5000),
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     anthropicModel: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
-    llmProvider: process.env.LLM_PROVIDER === "bedrock" ? "bedrock" : "anthropic",
+    llmProvider:
+      process.env.LLM_PROVIDER === "bedrock"
+        ? "bedrock"
+        : process.env.LLM_PROVIDER === "ollama"
+          ? "ollama"
+          : "anthropic",
     // Hard wall-clock cap on a single LLM call (fact extraction). Without it,
     // a hung request could stall a consolidation run indefinitely.
     llmTimeoutMs: envInt("LLM_TIMEOUT_MS", 60000),
     bedrockModel:
       process.env.BEDROCK_MODEL || "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     bedrockRegion: process.env.AWS_REGION || process.env.BEDROCK_REGION || "us-east-1",
+    ollamaBaseUrl: (process.env.OLLAMA_BASE_URL || "http://localhost:11434").replace(
+      /\/+$/,
+      ""
+    ),
+    ollamaModel: process.env.OLLAMA_MODEL || "llama3.1",
     leaseMs: envInt("CONSOLIDATION_LEASE_MS", 300000),
     claimBatchSize: envInt("CONSOLIDATION_BATCH_SIZE", 50),
     // Character budget for one extraction batch. CONSOLIDATION_BATCH_SIZE

@@ -121,7 +121,7 @@ This system integrates through Claude Code's public extension points only, so it
 - **The conversation loop, model selection, permissions and approval model, other tools, and compaction behavior are untouched.** This system only adds context at `SessionStart` (re-injected on compact and resume) and offers three optional MCP tools (`memory_search`, `memory_write`, `memory_forget`); it changes nothing else about how a session runs.
 - **This does not fix in-session context bloat or autocompact thrashing.** If a single oversized tool read or command output fills the context window and triggers repeated auto-compaction, that is a within-session token-budget problem (one read or output too large for the window), not the cross-session memory-loss problem this system solves. The fix for that is smaller reads or `/clear`, not a bigger model and not this memory engine: the brief injected at `SessionStart` here is capped at `BRIEF_CORE_TOKEN_CAP` plus `BRIEF_PROJECT_TOKEN_CAP` (800 plus 1200 tokens by default), a small, fixed addition that neither causes nor cures that failure mode.
 - **Failure isolation is total.** If MongoDB, Voyage, or the LLM provider is unreachable, all three hooks fail open and exit `0`, so a session behaves like stock Claude Code plus, at most, a missing brief. `memory_search` degrades to an explicit empty or degraded result rather than throwing.
-- **No data leaves infrastructure the user chose.** Memory lives only in the user's own Atlas cluster, and embedding, rerank, and fact-extraction calls go only to the providers the user configured (Voyage or the Atlas model API, Anthropic or Bedrock).
+- **No data leaves infrastructure the user chose.** Memory lives only in the user's own Atlas cluster, and embedding, rerank, and fact-extraction calls go only to the providers the user configured (Voyage or the Atlas model API, Anthropic, Bedrock, or a local Ollama model).
 
 ---
 
@@ -199,7 +199,7 @@ The TTL lease enforcing one active consolidator run per project.
 - Node.js (see `package.json` for toolchain; TypeScript 5.7, compiled to `dist/`)
 - A MongoDB Atlas cluster (Atlas Search and Atlas Vector Search require Atlas, not a self-managed deployment)
 - A Voyage AI API key, or a MongoDB Atlas model API key (the Atlas Embedding and Reranking API), for embeddings and reranking
-- An Anthropic API key, or AWS credentials for Bedrock, for the consolidator's fact-extraction LLM call
+- An Anthropic API key, AWS credentials for Bedrock, or a local Ollama server, for the consolidator's fact-extraction LLM call
 
 ### Install and build
 
@@ -230,10 +230,12 @@ All configuration is loaded by `loadConfig()` in `src/config.ts`. Nothing is req
 | `SESSION_END_TIMEOUT_MS` | `5000` | Fail-open budget for the `SessionEnd` hook |
 | `ANTHROPIC_API_KEY` | none | Required for fact extraction when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Extraction model |
-| `LLM_PROVIDER` | `anthropic` | `anthropic` or `bedrock` |
+| `LLM_PROVIDER` | `anthropic` | `anthropic`, `bedrock`, or `ollama` |
 | `LLM_TIMEOUT_MS` | `60000` | Hard wall-clock cap per LLM call attempt (fact extraction), Anthropic and Bedrock alike |
 | `BEDROCK_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Cross-region inference profile ID, used when `LLM_PROVIDER=bedrock` |
 | `AWS_REGION` / `BEDROCK_REGION` | `us-east-1` | AWS region for the Bedrock Converse API |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address, used when `LLM_PROVIDER=ollama` |
+| `OLLAMA_MODEL` | `llama3.1` | Model name to call for fact extraction when `LLM_PROVIDER=ollama`; must be pulled locally and support tool/function calling |
 | `CONSOLIDATION_LEASE_MS` | `300000` | Per-project consolidation lease duration |
 | `CONSOLIDATION_BATCH_SIZE` | `50` | Observations claimed per run (document count bound) |
 | `CONSOLIDATION_BATCH_MAX_CHARS` | `300000` | Total text-length budget per claimed batch; at least one observation is always taken. Bounds the extraction prompt in characters, since a count-only bound can exceed the model's context limit on large transcript observations |
@@ -445,6 +447,9 @@ Both modes are live, but `setup:indexes` only creates the index for the currentl
 |---|---|---|
 | `anthropic` (default) | Direct Anthropic API call for fact extraction, with forced tool choice. | `ANTHROPIC_API_KEY` |
 | `bedrock` | AWS Bedrock Converse API, using a cross-region inference profile ID. | AWS credentials resolvable in the environment (standard AWS SDK credential chain), `AWS_REGION`/`BEDROCK_REGION` |
+| `ollama` | A local Ollama server call for fact extraction, no forced tool choice (Ollama has no equivalent to Anthropic/Bedrock's forced tool_choice, so extraction reliability depends on the chosen model's own function-calling quality). Free and fully local: no API key or cloud credentials needed. | None; requires `ollama serve` running locally with `OLLAMA_MODEL` already pulled (`ollama pull llama3.1`) |
+
+Ollama here only replaces the consolidator's fact-extraction LLM call: embeddings and reranking still require Voyage (or the Atlas model API) regardless of which `LLM_PROVIDER` is chosen, so a fully local, zero-API-key setup end to end is not yet available.
 
 ### `VOYAGE_BASE_URL`: native Voyage vs. Atlas model API key
 
@@ -462,6 +467,7 @@ Both modes are live, but `setup:indexes` only creates the index for the currentl
 | `EMBEDDING_MODE=auto`, `RERANK_MODE=auto` | `VOYAGE_API_KEY` for query embedding and rerank fallback (write-path embedding is server-side and needs no app credential); Atlas org enablement for `autoEmbed` and `$rerank` |
 | Any embedding/rerank mode + `LLM_PROVIDER=anthropic` | Add `ANTHROPIC_API_KEY` |
 | Any embedding/rerank mode + `LLM_PROVIDER=bedrock` | Add AWS credentials in the environment; no `ANTHROPIC_API_KEY` needed |
+| Any embedding/rerank mode + `LLM_PROVIDER=ollama` | Requires a local Ollama server reachable at `OLLAMA_BASE_URL` with `OLLAMA_MODEL` pulled; no `ANTHROPIC_API_KEY` or AWS credentials needed for the LLM step, Voyage credentials are still required for embeddings/rerank |
 
 ---
 

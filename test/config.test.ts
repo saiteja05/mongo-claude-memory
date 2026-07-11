@@ -17,6 +17,9 @@ const ENV_KEYS = [
   "SESSION_END_TIMEOUT_MS",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_MODEL",
+  "LLM_PROVIDER",
+  "OLLAMA_BASE_URL",
+  "OLLAMA_MODEL",
   "CONSOLIDATION_LEASE_MS",
   "CONSOLIDATION_BATCH_SIZE",
   "CONSOLIDATION_RECLAIM_MS",
@@ -243,6 +246,83 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.anthropicModel).toBe("claude-opus-4");
+  });
+
+  it("defaults llmProvider to anthropic when LLM_PROVIDER is unset", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.llmProvider).toBe("anthropic");
+  });
+
+  it("resolves llmProvider to bedrock when LLM_PROVIDER=bedrock", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.LLM_PROVIDER = "bedrock";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.llmProvider).toBe("bedrock");
+  });
+
+  it("resolves llmProvider to ollama when LLM_PROVIDER=ollama", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.LLM_PROVIDER = "ollama";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.llmProvider).toBe("ollama");
+  });
+
+  it("defaults ollamaBaseUrl when OLLAMA_BASE_URL is unset", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.ollamaBaseUrl).toBe("http://localhost:11434");
+  });
+
+  it("respects an explicit OLLAMA_BASE_URL override", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.OLLAMA_BASE_URL = "http://localhost:12345";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.ollamaBaseUrl).toBe("http://localhost:12345");
+  });
+
+  it("strips a trailing slash from OLLAMA_BASE_URL", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.OLLAMA_BASE_URL = "http://localhost:11434/";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.ollamaBaseUrl).toBe("http://localhost:11434");
+  });
+
+  it("defaults ollamaModel when OLLAMA_MODEL is unset", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.ollamaModel).toBe("llama3.1");
+  });
+
+  it("respects an explicit OLLAMA_MODEL override", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.OLLAMA_MODEL = "mistral";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.ollamaModel).toBe("mistral");
   });
 
   it("defaults leaseMs when CONSOLIDATION_LEASE_MS is unset", async () => {

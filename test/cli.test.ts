@@ -161,6 +161,20 @@ describe("main (default consolidation path)", () => {
     expect(runConsolidation).toHaveBeenCalledTimes(1);
   });
 
+  it("with llmProvider ollama and no ANTHROPIC_API_KEY, proceeds past the gate (ollama needs no API key)", async () => {
+    loadConfig.mockReturnValue(makeConfig({ llmProvider: "ollama", anthropicApiKey: undefined }));
+    const { db } = makeFakeDb();
+    getDb.mockResolvedValue(db);
+    runConsolidation.mockResolvedValue({ processed: 1, skipped: false });
+
+    setArgs("my-project");
+    await main();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(getDb).toHaveBeenCalled();
+    expect(runConsolidation).toHaveBeenCalledTimes(1);
+  });
+
   it("with llmProvider anthropic (explicit) and no ANTHROPIC_API_KEY, still skips the run cleanly", async () => {
     loadConfig.mockReturnValue(makeConfig({ llmProvider: "anthropic", anthropicApiKey: undefined }));
 

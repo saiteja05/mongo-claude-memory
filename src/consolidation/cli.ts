@@ -248,9 +248,10 @@ export async function main(): Promise<void> {
       // Mirrors how the rest of the system degrades when a credential is
       // missing (DESIGN.md section 10): log clearly and exit cleanly. Only
       // applies to the anthropic provider: a bedrock-configured machine uses
-      // AWS credentials instead and should not be gated on this check.
+      // AWS credentials instead, and an ollama-configured machine talks to a
+      // local model, so neither should be gated on this check.
       console.error(
-        "[consolidate] ANTHROPIC_API_KEY is not configured; skipping consolidation run. Set LLM_PROVIDER=bedrock to use AWS credentials instead."
+        "[consolidate] ANTHROPIC_API_KEY is not configured; skipping consolidation run. Set LLM_PROVIDER=bedrock to use AWS credentials, or LLM_PROVIDER=ollama for a local free model, instead."
       );
       return;
     }
