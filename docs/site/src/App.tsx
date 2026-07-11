@@ -22,7 +22,7 @@ function App() {
 
   const navLinks = [
     { href: 'https://github.com/saiteja05/mongo-claude-memory#architecture-overview', label: 'Architecture' },
-    { href: 'https://github.com/saiteja05/mongo-claude-memory#using-it', label: 'How it works' },
+    { href: '#how-it-works', label: 'How it works' },
     { href: 'https://github.com/saiteja05/mongo-claude-memory#configuration-modes', label: 'Modes' },
   ];
 
@@ -45,8 +45,7 @@ function App() {
             <a
               key={link.href}
               href={link.href}
-              target="_blank"
-              rel="noopener noreferrer"
+              {...(!link.href.startsWith('#') ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
               className={`text-sm px-3 py-2 transition-colors ${
                 i === 0 ? 'font-semibold text-[#1f2a1d]' : 'font-medium text-[#4b5b47] hover:text-[#1f2a1d]'
               }`}
@@ -123,8 +122,7 @@ function App() {
               <a
                 key={link.href}
                 href={link.href}
-                target="_blank"
-                rel="noopener noreferrer"
+                {...(!link.href.startsWith('#') ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
                 onClick={() => setMenuOpen(false)}
                 className={`text-2xl font-semibold text-[#1f2a1d] py-4 border-b border-[#1f2a1d]/10 transition-all duration-500 ${
                   menuOpen ? 'translate-x-0 opacity-100' : 'translate-x-8 opacity-0'
@@ -233,9 +231,7 @@ function App() {
       </div>
 
       <a
-        href="https://github.com/saiteja05/mongo-claude-memory#using-it"
-        target="_blank"
-        rel="noopener noreferrer"
+        href="#how-it-works"
         className="hidden sm:flex absolute right-6 md:right-10 bottom-8 md:bottom-10 z-10 items-center gap-2 text-white/90 text-sm"
       >
         <span className="flex items-center justify-center w-6 h-6 rounded-full bg-white/20 backdrop-blur-sm hover:bg-white/30 transition-colors">

@@ -54,6 +54,11 @@ export interface Belief {
   last_used?: Date;
   created_at: Date;
   updated_at: Date;
+  // Timestamp of the newest observation backing this belief's current text.
+  // Guards the dedupe path against stale text overwrites (a replayed old
+  // observation must not regress a newer correction) and feeds the brief
+  // compiler's recency signal.
+  last_evidence_at?: Date;
   version: number; // optimistic-concurrency guard for targeted edits
   status: BeliefStatus;
   supersedes?: string; // belief _id this replaced, if any

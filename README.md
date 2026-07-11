@@ -216,21 +216,28 @@ All configuration is loaded by `loadConfig()` in `src/config.ts`. Nothing is req
 | `VOYAGE_BASE_URL` | `https://api.voyageai.com` | Set to `https://ai.mongodb.com` to use an Atlas model API key instead of a native Voyage key |
 | `BRIEF_CORE_TOKEN_CAP` | `800` | Token cap for the global (`core`) brief |
 | `BRIEF_PROJECT_TOKEN_CAP` | `1200` | Token cap for the per-project brief |
-| `HOOK_INTERNAL_TIMEOUT_MS` | `800` | Fail-open budget for `SessionStart`'s brief fetch |
+| `SESSION_START_TIMEOUT_MS` | `3000` | Fail-open budget for `SessionStart`'s brief fetch. When unset, falls back to `HOOK_INTERNAL_TIMEOUT_MS` if that is set, else 3000 (cold Atlas connects need more than the 800ms general default) |
+| `HOOK_INTERNAL_TIMEOUT_MS` | `800` | General hook-internal fail-open default; also the `SessionStart` fallback when `SESSION_START_TIMEOUT_MS` is unset |
+| `HOOK_WRITE_TIMEOUT_MS` | `5000` | Budget for the `UserPromptSubmit` hash-line capture write. Explicit remember requests get a longer budget so an in-flight insert is not killed mid-write |
 | `OBSERVATION_TTL_DAYS` | `30` | TTL for normal-priority observations |
 | `SESSION_END_TIMEOUT_MS` | `5000` | Fail-open budget for the `SessionEnd` hook |
 | `ANTHROPIC_API_KEY` | none | Required for fact extraction when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Extraction model |
 | `LLM_PROVIDER` | `anthropic` | `anthropic` or `bedrock` |
+| `LLM_TIMEOUT_MS` | `60000` | Hard wall-clock cap per LLM call attempt (fact extraction), Anthropic and Bedrock alike |
 | `BEDROCK_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Cross-region inference profile ID, used when `LLM_PROVIDER=bedrock` |
 | `AWS_REGION` / `BEDROCK_REGION` | `us-east-1` | AWS region for the Bedrock Converse API |
 | `CONSOLIDATION_LEASE_MS` | `300000` | Per-project consolidation lease duration |
-| `CONSOLIDATION_BATCH_SIZE` | `50` | Observations claimed per run |
-| `CONSOLIDATION_RECLAIM_MS` | `600000` | Age after which a stale `claimed` observation is reclaimed to `pending` |
-| `CONSOLIDATION_BELIEFS_CONTEXT_LIMIT` | `30` | Existing beliefs passed to the LLM as dedup/context |
+| `CONSOLIDATION_BATCH_SIZE` | `50` | Observations claimed per run (document count bound) |
+| `CONSOLIDATION_BATCH_MAX_CHARS` | `300000` | Total text-length budget per claimed batch; at least one observation is always taken. Bounds the extraction prompt in characters, since a count-only bound can exceed the model's context limit on large transcript observations |
+| `CONSOLIDATION_RECLAIM_MS` | `600000` | Age after which a stale `claimed` observation is reclaimed to `pending`; also the age at which a crashed run's project is rediscovered by the no-argument consolidator |
+| `CONSOLIDATION_BELIEFS_CONTEXT_LIMIT` | `30` | Existing beliefs passed to the LLM as dedup/context (most recently updated first) |
 | `CONSOLIDATION_DEDUPE_THRESHOLD` | `0.93` | Vector similarity threshold above which a candidate fact is treated as a duplicate of an existing belief |
 | `EMBEDDING_MODE` | `appside` | `appside` or `auto` (see Configuration modes) |
 | `RERANK_MODE` | `auto` | `auto`, `native`, or `appside` (see Configuration modes) |
+| `MEMORY_PROJECT_KEY_MODE` | `path` | `path` keys memory by the local `.git` directory path (stable per machine/clone); `remote` keys by the normalized `remote.origin.url`, so every clone on every machine shares one key. Switching modes re-keys project memory: beliefs stored under the old key stay there. `remote` falls back to `path` when there is no origin remote |
+| `MEMORY_MCP_ALLOW_CROSS_PROJECT` | unset | Set to `1` to allow `memory_forget` to tombstone beliefs in a project other than the MCP server's resolved one. Off by default; `memory_search` and `memory_write` are unrestricted either way |
+| `MEMORY_FAILURE_LOG` | `~/.mongo-claude-memory/failures.log` | Destination for the silent-failure telemetry log (see Diagnosing silent failures) |
 
 ### Index setup
 
@@ -246,7 +253,7 @@ This creates the four collections if missing, the observation TTL index, the bel
 
 Wire the following hooks into Claude Code's settings (`hooks` in `settings.json`), pointing at the built `dist/` entry points:
 
-- `SessionStart`, matched on start, compact, and resume, running `node dist/hooks/sessionStart.js`. This is what re-injects the brief after a compaction, not only at the very first launch.
+- `SessionStart`, matched with `"startup|resume|clear|compact"`, running `node dist/hooks/sessionStart.js`. This is what re-injects the brief after a compaction, a `/clear`, or a resume, not only at the very first launch.
 - `UserPromptSubmit`, running `node dist/hooks/userPromptSubmit.js`, to capture prompts whose first non-whitespace character is `#` as high-priority observations.
 - `SessionEnd`, running `node dist/hooks/sessionEnd.js`, to capture a transcript summary as an observation.
 
@@ -278,9 +285,9 @@ Once the hooks and MCP server are registered (see Getting started above), day-to
 
 Nothing to configure per session. Three hooks run without any user action:
 
-- **`SessionStart`** (start, compact, resume): fetches `brief:global` and `brief:<project>` with a single `findOne` each and injects their combined `content` as `additionalContext`. Conceptually, the injected brief reads like a short paragraph of standing facts and conventions, for example "Prefers pnpm over npm. This repo's CI gate is `npm run build && npm test`. Uses Bedrock in prod, Anthropic API in dev." It is capped at `BRIEF_CORE_TOKEN_CAP` (800 tokens, global) plus `BRIEF_PROJECT_TOKEN_CAP` (1200 tokens, per project), so it is always a small, fixed-size block, not the full memory store.
+- **`SessionStart`** (startup, resume, clear, compact): fetches `brief:global` and `brief:<project>` with a single `findOne` each and injects their combined `content` as `additionalContext`. Conceptually, the injected brief reads like a short paragraph of standing facts and conventions, for example "Prefers pnpm over npm. This repo's CI gate is `npm run build && npm test`. Uses Bedrock in prod, Anthropic API in dev." It is capped at `BRIEF_CORE_TOKEN_CAP` (800 tokens, global) plus `BRIEF_PROJECT_TOKEN_CAP` (1200 tokens, per project), so it is always a small, fixed-size block, not the full memory store.
 - **`UserPromptSubmit`**: any prompt whose first non-whitespace character is `#` is captured as a high-priority observation (`source: "hash_line"`), the same mechanism Claude Code's own quick-add uses. For example typing `# always run migrations before seeding` writes that line to `observations`; the prompt still passes through to Claude unmodified.
-- **`SessionEnd`**: captures the last 50,000 characters of the session transcript as one normal-priority observation (`source: "transcript"`), for the consolidator to later extract facts from.
+- **`SessionEnd`**: captures the last 50,000 characters of the session transcript as one normal-priority observation (`source: "transcript"`), for the consolidator to later extract facts from. Before writing, it strips any exact occurrence of the currently injected brief content from the tail (echo-loop defense: the injected brief is memory output, not new evidence).
 
 All three hooks fail open: if MongoDB is unreachable or misconfigured, they no-op silently and exit `0`. You will never see a memory-path error surface in a session.
 
@@ -362,7 +369,9 @@ The response is:
 }
 ```
 
-This does not hard-delete anything. It sets that belief's `status` to `"tombstoned"`, bumps `version`, and updates `updated_at`, filtered on both `_id` and `project` so a caller cannot tombstone another project's belief by guessing an id. A tombstoned belief is excluded from the brief and from `memory_search` results, and is hard-deleted only later, by the partial TTL index, 90 days after tombstoning.
+This does not hard-delete anything. It sets that belief's `status` to `"tombstoned"`, bumps `version`, and updates `updated_at`, filtered on both `_id` and `project` so a caller cannot tombstone another project's belief by guessing an id, then immediately recompiles the affected brief(s) so the belief stops being injected at the very next `SessionStart`. A tombstoned belief is excluded from the brief and from `memory_search` results, and is hard-deleted only later, by the partial TTL index, 90 days after tombstoning.
+
+Forgetting a belief in a project other than the MCP server's resolved one is rejected by default (destructive writes stay scoped to the project you are working in); set `MEMORY_MCP_ALLOW_CROSS_PROJECT=1` to allow it. `memory_search` and `memory_write` are unrestricted either way (reads and appends are low-risk).
 
 ### 5. Keeping memory tidy
 
@@ -475,6 +484,13 @@ The consolidator CLI (`src/consolidation/cli.ts`, `node dist/consolidation/cli.j
 - **Never-throw hooks**: `SessionStart`, `UserPromptSubmit`, and `SessionEnd` all wrap their entire body in a fail-open guard; any failure, including a missing connection string, results in a silent no-op and a clean process exit, never a visible error to the session.
 - **Injection deny-list**: extracted facts pass a schema and content validator before being written as beliefs (no imperative-to-the-assistant phrasing, no tool or hook directives), since observation text is untrusted transcript content and must never be treated as an instruction to the extraction LLM or to future sessions.
 - **TTL cleanup**: normal-priority observations expire after `OBSERVATION_TTL_DAYS` (default 30); archived or tombstoned beliefs expire after 90 days via a partial TTL index. High-priority captures (`/remember`, `hash_line`, `mcp_write`) never expire as observations, and active beliefs are never hard-deleted by the pipeline, only archived or tombstoned with provenance.
+
+### Diagnosing silent failures
+
+The hooks fail open by design: when MongoDB, Voyage, or the LLM is unreachable, a session behaves like stock Claude Code with no visible error. Two tools exist so "silently doing nothing" is still diagnosable:
+
+- **Failure log.** Every fail-open catch in the three hooks, plus `memory_search`'s total-failure path, appends one line to a local log file: ISO timestamp, component (for example `sessionStart.timeout`, `userPromptSubmit.error`, `sessionEnd`, `memorySearch`), and the error's name only, never its message (driver messages can embed connection details). The file lives at `$MEMORY_FAILURE_LOG`, defaulting to `~/.mongo-claude-memory/failures.log`. If memory seems inert, read this file first.
+- **`--doctor`.** `node dist/consolidation/cli.js --doctor` runs an end-to-end connectivity self-check: connects, writes a canary observation to project `doctor:canary` (normal priority, so the observation TTL cleans up any leftovers), reads it back, deletes it, and times a `brief:global` fetch against the `SESSION_START_TIMEOUT_MS` budget. It prints each step's latency and pass/fail and exits non-zero when any step fails. It never prints connection strings.
 
 ---
 

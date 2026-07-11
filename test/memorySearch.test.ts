@@ -7,6 +7,7 @@ const ENV_KEYS = [
   "MEMORY_MONGODB_URI",
   "EMBEDDING_MODE",
   "RERANK_MODE",
+  "MEMORY_FAILURE_LOG",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -32,6 +33,9 @@ beforeEach(() => {
     delete process.env[key];
   }
   process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+  // The total-failure path appends one telemetry line; point it at a scratch
+  // location so tests never touch the user's real failure log.
+  process.env.MEMORY_FAILURE_LOG = `${process.env.TMPDIR || "/tmp"}/mongo-claude-memory-test-failures.log`;
 });
 
 afterEach(() => {
@@ -242,6 +246,91 @@ describe("runMemorySearch", () => {
     expect(hasStage(aggregate.mock.calls[0][1], "$rerank")).toBe(false);
     expect(rerank).toHaveBeenCalledTimes(1);
     expect(second.results[0]._id).toBe("b2");
+  });
+
+  it("does NOT cache unavailability after a transient (non-stage-related) $rerank error: the next call re-attempts native rerank", async () => {
+    const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+    const embed = vi.fn(async () => [[0.1, 0.2]]);
+    const rerank = vi.fn(async () => [
+      { index: 0, relevance_score: 0.9 },
+      { index: 1, relevance_score: 0.5 },
+    ]);
+    let rerankAttempts = 0;
+    const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+      if (hasStage(pipeline, "$rerank")) {
+        rerankAttempts++;
+        if (rerankAttempts === 1) {
+          // Transient failure: nothing about the stage being unsupported.
+          throw new Error("connection reset by peer");
+        }
+        return baseDocs.map((d) => ({ ...d, rerankScore: 0.95 }));
+      }
+      return baseDocs;
+    });
+    const updateUseCount = vi.fn(async () => undefined);
+    const deps = { embed, rerank, aggregate, updateUseCount };
+
+    const first = await runMemorySearch(fakeDb, { query: "q1", project: "myrepo-abc" }, deps);
+    // Fell back to Voyage for this one call only.
+    expect(rerank).toHaveBeenCalledTimes(1);
+    expect(first.results.length).toBeGreaterThan(0);
+
+    rerank.mockClear();
+
+    const second = await runMemorySearch(fakeDb, { query: "q2", project: "myrepo-abc" }, deps);
+    // The transient error was not cached: native $rerank is attempted again
+    // and succeeds, so the Voyage fallback is not needed.
+    expect(rerankAttempts).toBe(2);
+    expect(rerank).not.toHaveBeenCalled();
+    expect(second.results[0].score).toBe(0.95);
+  });
+
+  it("re-probes native $rerank after the 10-minute negative cache expires", async () => {
+    const { runMemorySearch, __setRerankCacheClockForTests } = await import(
+      "../src/mcp/memorySearch.js"
+    );
+
+    let fakeNow = 1_000_000;
+    __setRerankCacheClockForTests(() => fakeNow);
+
+    const embed = vi.fn(async () => [[0.1, 0.2]]);
+    const rerank = vi.fn(async () => [
+      { index: 0, relevance_score: 0.9 },
+      { index: 1, relevance_score: 0.5 },
+    ]);
+    let rerankAttempts = 0;
+    const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+      if (hasStage(pipeline, "$rerank")) {
+        rerankAttempts++;
+        if (rerankAttempts === 1) {
+          throw new Error("Unrecognized pipeline stage name: '$rerank'");
+        }
+        return baseDocs.map((d) => ({ ...d, rerankScore: 0.95 }));
+      }
+      return baseDocs;
+    });
+    const updateUseCount = vi.fn(async () => undefined);
+    const deps = { embed, rerank, aggregate, updateUseCount };
+
+    try {
+      await runMemorySearch(fakeDb, { query: "q1", project: "myrepo-abc" }, deps);
+      expect(rerankAttempts).toBe(1); // probed, definitively unsupported, cached
+
+      // Within the TTL: cache still holds, no re-probe.
+      fakeNow += 5 * 60 * 1000;
+      await runMemorySearch(fakeDb, { query: "q2", project: "myrepo-abc" }, deps);
+      expect(rerankAttempts).toBe(1);
+
+      // Past the 10-minute TTL: the negative cache expires and native
+      // $rerank is probed again (and now succeeds).
+      fakeNow += 6 * 60 * 1000;
+      const third = await runMemorySearch(fakeDb, { query: "q3", project: "myrepo-abc" }, deps);
+      expect(rerankAttempts).toBe(2);
+      expect(third.results[0].score).toBe(0.95);
+    } finally {
+      __setRerankCacheClockForTests(null);
+    }
   });
 
   it("attempts the use_count/last_used side effect after a successful search, and its failure does not throw out of runMemorySearch", async () => {

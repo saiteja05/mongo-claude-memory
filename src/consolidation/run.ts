@@ -24,6 +24,9 @@ export interface RunConsolidationDeps {
   // "text" path. Optional, defaulting to "appside" (current behavior), so
   // existing callers/tests that omit it are unaffected.
   embeddingMode?: "appside" | "auto";
+  // Total text-length budget for one claimed batch (see claim.ts). Optional
+  // so existing callers/tests that omit it keep claimBatch's own default.
+  consolidationBatchMaxChars?: number;
   reclaimStale: (db: Db, project: string, reclaimAfterMs: number) => Promise<number>;
   acquireLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
   renewLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
@@ -32,7 +35,8 @@ export interface RunConsolidationDeps {
     db: Db,
     project: string,
     runId: string,
-    batchSize: number
+    batchSize: number,
+    maxChars?: number
   ) => Promise<Observation[]>;
   fetchExistingBeliefs: (db: Db, project: string, limit: number) => Promise<ExistingBeliefContext[]>;
   extractFacts: (
@@ -45,7 +49,8 @@ export interface RunConsolidationDeps {
     project: string,
     candidate: CandidateFact,
     embedding: number[] | null,
-    threshold: number
+    threshold: number,
+    candidateEvidenceAt?: Date
   ) => Promise<UpsertBeliefResult>;
   compileBrief: (db: Db, scopeKey: string) => Promise<void>;
   markConsolidated: (
@@ -56,7 +61,12 @@ export interface RunConsolidationDeps {
   ) => Promise<void>;
 }
 
-/** Default beliefs-context query: up to `limit` active beliefs for the project. */
+/**
+ * Default beliefs-context query: up to `limit` active beliefs for the
+ * project, most recently updated first, so the LLM's dedupe/supersede
+ * context window contains the beliefs most likely to be relevant to new
+ * observations rather than an arbitrary natural-order slice.
+ */
 export async function fetchExistingBeliefs(
   db: Db,
   project: string,
@@ -65,6 +75,7 @@ export async function fetchExistingBeliefs(
   const docs = await db
     .collection<Document>(BELIEFS)
     .find({ project, status: "active" }, { projection: { text: 1 } })
+    .sort({ updated_at: -1 })
     .limit(limit)
     .toArray();
   return docs.map((doc) => ({ _id: String(doc._id), text: String(doc.text) }));
@@ -102,9 +113,27 @@ export async function runConsolidation(
   }
 
   try {
-    const claimed = await deps.claimBatch(db, project, deps.runId, deps.claimBatchSize);
+    const claimed = await deps.claimBatch(
+      db,
+      project,
+      deps.runId,
+      deps.claimBatchSize,
+      deps.consolidationBatchMaxChars
+    );
     if (claimed.length === 0) {
       return { processed: 0, skipped: false };
+    }
+
+    // Map observation id -> created_at so each candidate can carry the
+    // timestamp of its newest backing observation (its "evidence time").
+    // upsertBelief uses it to refuse stale text overwrites: without it, a
+    // reprocessed old observation could regress a belief that a newer
+    // correction already updated (dedupe last-write-wins).
+    const observationCreatedAt = new Map<string, Date>();
+    for (const doc of claimed) {
+      if (doc.created_at instanceof Date) {
+        observationCreatedAt.set(String(doc._id), doc.created_at);
+      }
     }
 
     const existingBeliefs = await deps.fetchExistingBeliefs(db, project, deps.beliefsContextLimit);
@@ -144,7 +173,26 @@ export async function runConsolidation(
       // doc's "text" path, so no app-side Voyage call is needed here.
       const embedding =
         deps.embeddingMode === "auto" ? null : (await deps.embed([candidate.text]))[0];
-      await deps.upsertBelief(db, project, candidate, embedding, deps.dedupeSimilarityThreshold);
+
+      // The candidate's evidence time is the newest created_at among its
+      // backing observations (undefined when none resolve, e.g. mocked ids;
+      // upsertBelief falls back to now).
+      const evidenceTimes = candidate.observation_ids
+        .map((id) => observationCreatedAt.get(String(id)))
+        .filter((date): date is Date => date instanceof Date);
+      const candidateEvidenceAt =
+        evidenceTimes.length > 0
+          ? new Date(Math.max(...evidenceTimes.map((date) => date.getTime())))
+          : undefined;
+
+      await deps.upsertBelief(
+        db,
+        project,
+        candidate,
+        embedding,
+        deps.dedupeSimilarityThreshold,
+        candidateEvidenceAt
+      );
       processed++;
       if (candidate.scope === "core") {
         globalChanged = true;

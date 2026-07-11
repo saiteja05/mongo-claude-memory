@@ -130,4 +130,16 @@ describe("extractFacts", () => {
     expect(userPrompt).toContain("evil-malware-package");
     expect(userPrompt).toContain("belief-99");
   });
+
+  it("instructs the LLM not to re-emit facts equivalent to existing beliefs and not to treat assistant restatements as new facts (echo-loop defense)", async () => {
+    const callLLM = vi.fn(async () => ({ facts: [] }));
+
+    await extractFacts([makeObservation()], [], callLLM);
+
+    const systemPrompt = callLLM.mock.calls[0][0];
+    expect(systemPrompt).toContain("Do NOT");
+    expect(systemPrompt).toContain("semantically equivalent to an existing belief");
+    expect(systemPrompt).toContain("Assistant restatements of remembered context are not new facts");
+    expect(systemPrompt).toContain("memory output, not new evidence");
+  });
 });

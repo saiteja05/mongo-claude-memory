@@ -7,6 +7,7 @@ const ENV_KEYS = [
   "BEDROCK_MODEL",
   "AWS_REGION",
   "BEDROCK_REGION",
+  "LLM_TIMEOUT_MS",
 ] as const;
 
 const SECRET_AWS_KEY = "AKIA-totally-secret-aws-access-key";
@@ -171,6 +172,49 @@ describe("bedrock callWithTool", () => {
         properties: {},
       })
     ).rejects.toThrow();
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws a non-retryable error (single attempt) when the Converse response stopped on max_tokens", async () => {
+    sendMock.mockImplementation(async () => ({
+      stopReason: "max_tokens",
+      ...toolUseResult("emit_result", { partial: true }),
+    }));
+
+    const { callWithTool } = await import("../src/llm/bedrock.js");
+    await expect(
+      callWithTool("system prompt", "user prompt", "emit_result", {
+        type: "object",
+        properties: {},
+      })
+    ).rejects.toThrow(/max_tokens.*reduce batch size/);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a hung Converse request once LLM_TIMEOUT_MS elapses via the abortSignal passed to send", async () => {
+    process.env.LLM_TIMEOUT_MS = "10";
+    // A send that never resolves on its own; it only rejects when the
+    // abortSignal passed in the send options fires.
+    sendMock.mockImplementation(
+      (_command: unknown, options: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.abortSignal.addEventListener("abort", () => {
+            const err = new Error("Request aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        })
+    );
+
+    const { callWithTool } = await import("../src/llm/bedrock.js");
+    await expect(
+      callWithTool("system prompt", "user prompt", "emit_result", {
+        type: "object",
+        properties: {},
+      })
+    ).rejects.toThrow(/aborted/i);
+    // AbortError is not in the retryable set, so the hung call fails after a
+    // single timed-out attempt instead of hanging or retrying two more times.
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });

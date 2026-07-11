@@ -8,3 +8,7 @@ html, body, #root {
   font-family: 'Neue Haas Grotesk Display Pro 55 Roman', 'Neue Haas Grotesk Text Pro', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+html {
+  scroll-behavior: smooth;
+}

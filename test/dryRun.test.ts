@@ -258,8 +258,10 @@ describe("defaultDryRunDeps", () => {
     };
     const beliefsCollection = {
       find: vi.fn(() => ({
-        limit: () => ({
-          toArray: async () => [beliefDoc],
+        sort: () => ({
+          limit: () => ({
+            toArray: async () => [beliefDoc],
+          }),
         }),
       })),
     };

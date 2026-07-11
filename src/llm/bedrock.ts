@@ -86,8 +86,26 @@ export async function callWithTool(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Hard wall-clock timeout per attempt (same budget as anthropic.ts):
+    // without it a hung Converse request would stall the run indefinitely.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.llmTimeoutMs);
+    timer.unref?.();
+
     try {
-      const response = await client.send(command);
+      const response = await client.send(command, { abortSignal: controller.signal });
+
+      // A max_tokens stop means the tool output was cut off mid-JSON: the
+      // parsed input would be silently incomplete, and marking the batch
+      // consolidated from it would lose facts. Fail the run non-retryably
+      // (a retry would truncate identically) so the batch stays claimed and
+      // reclaimable.
+      if (response.stopReason === "max_tokens") {
+        throw new NonRetryableBedrockError(
+          "extraction output truncated by max_tokens; reduce batch size"
+        );
+      }
+
       const blocks: ContentBlock[] = response.output?.message?.content ?? [];
       const toolUse = blocks.find(
         (block) => block.toolUse !== undefined && block.toolUse.name === toolName
@@ -112,6 +130,8 @@ export async function callWithTool(
         continue;
       }
       break;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

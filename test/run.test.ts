@@ -97,6 +97,72 @@ describe("runConsolidation", () => {
     errorSpy.mockRestore();
   });
 
+  it("passes consolidationBatchMaxChars through to claimBatch as the fifth argument", async () => {
+    const claimBatch = vi.fn(async () => []);
+    const deps = makeDeps({ claimBatch, consolidationBatchMaxChars: 123456 });
+
+    await runConsolidation(fakeDb, "proj", deps);
+
+    expect(claimBatch).toHaveBeenCalledWith(fakeDb, "proj", "run-1", 50, 123456);
+  });
+
+  it("passes each candidate's newest backing observation created_at to upsertBelief as candidateEvidenceAt", async () => {
+    const older = new Date("2026-07-01T00:00:00Z");
+    const newer = new Date("2026-07-05T00:00:00Z");
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: older },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: newer },
+    ];
+    const candidates = [
+      {
+        text: "The user prefers tabs.",
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1", "obs-2"],
+        supersedes_belief_id: null,
+      },
+    ];
+    const upsertBelief = vi.fn(async () => ({ beliefId: "belief-1", action: "insert" as const }));
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      upsertBelief,
+    });
+
+    await runConsolidation(fakeDb, "proj", deps);
+
+    expect(upsertBelief).toHaveBeenCalledTimes(1);
+    const evidenceAt = (upsertBelief.mock.calls[0] as unknown[])[5];
+    expect(evidenceAt).toEqual(newer);
+  });
+
+  it("passes undefined candidateEvidenceAt when a candidate's observation_ids resolve to no claimed observation", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const candidates = [
+      {
+        text: "The user prefers tabs.",
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["not-a-claimed-obs"],
+        supersedes_belief_id: null,
+      },
+    ];
+    const upsertBelief = vi.fn(async () => ({ beliefId: "belief-1", action: "insert" as const }));
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      upsertBelief,
+    });
+
+    await runConsolidation(fakeDb, "proj", deps);
+
+    expect((upsertBelief.mock.calls[0] as unknown[])[5]).toBeUndefined();
+  });
+
   it("also compiles the global brief when a candidate has scope 'core' and the project is not already 'global'", async () => {
     const claimed = [
       { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
@@ -276,13 +342,14 @@ describe("runConsolidation", () => {
 });
 
 describe("fetchExistingBeliefs", () => {
-  it("queries active beliefs for the project with a text-only projection and the given limit, mapping _id/text into ExistingBeliefContext", async () => {
+  it("queries active beliefs for the project with a text-only projection, sorted by updated_at descending, with the given limit, mapping _id/text into ExistingBeliefContext", async () => {
     const docs = [
       { _id: "belief-1", text: "First belief." },
       { _id: "belief-2", text: "Second belief." },
     ];
     const limitFn = vi.fn(() => ({ toArray: async () => docs }));
-    const findFn = vi.fn(() => ({ limit: limitFn }));
+    const sortFn = vi.fn(() => ({ limit: limitFn }));
+    const findFn = vi.fn(() => ({ sort: sortFn }));
     const collectionFn = vi.fn(() => ({ find: findFn }));
     const db = { collection: collectionFn } as any;
 
@@ -293,6 +360,9 @@ describe("fetchExistingBeliefs", () => {
       { project: "proj", status: "active" },
       { projection: { text: 1 } }
     );
+    // Most recently updated first: the LLM's dedupe/supersede context window
+    // must hold the freshest beliefs, not an arbitrary natural-order slice.
+    expect(sortFn).toHaveBeenCalledWith({ updated_at: -1 });
     expect(limitFn).toHaveBeenCalledWith(30);
     expect(result).toEqual([
       { _id: "belief-1", text: "First belief." },
@@ -306,7 +376,8 @@ describe("fetchExistingBeliefs", () => {
     // whatever raw type the driver returned through untouched.
     const docs = [{ _id: { toString: () => "obj-id-1" }, text: 123 }];
     const limitFn = vi.fn(() => ({ toArray: async () => docs }));
-    const findFn = vi.fn(() => ({ limit: limitFn }));
+    const sortFn = vi.fn(() => ({ limit: limitFn }));
+    const findFn = vi.fn(() => ({ sort: sortFn }));
     const db = { collection: vi.fn(() => ({ find: findFn })) } as any;
 
     const result = await fetchExistingBeliefs(db, "proj", 10);

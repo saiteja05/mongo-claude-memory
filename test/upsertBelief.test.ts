@@ -297,4 +297,91 @@ describe("upsertBelief", () => {
       expect(doc.embedding).toEqual([0.1, 0.2]);
     });
   });
+
+  describe("evidence recency (last_evidence_at)", () => {
+    const older = new Date("2026-07-01T00:00:00Z");
+    const newer = new Date("2026-07-05T00:00:00Z");
+
+    it("stamps last_evidence_at from candidateEvidenceAt on insert", async () => {
+      const { db, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93, {}, newer);
+
+      const [doc] = insertOne.mock.calls[0];
+      expect(doc.last_evidence_at).toEqual(newer);
+    });
+
+    it("overwrites text (and advances last_evidence_at) when the candidate's evidence is newer than the existing belief's", async () => {
+      const existingId = new ObjectId().toString();
+      const { db, updateOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: existingId, text: "old text", score: 0.97 }],
+        findOneResult: {
+          _id: existingId,
+          text: "old text",
+          observation_ids: ["obs-0"],
+          last_evidence_at: older,
+        },
+      });
+
+      const candidate = makeCandidate({ text: "corrected text", observation_ids: ["obs-1"] });
+      const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, newer);
+
+      expect(result.action).toBe("update");
+      const [, update] = updateOne.mock.calls[0];
+      expect(update.$set.text).toBe("corrected text");
+      expect(update.$set.last_evidence_at).toEqual(newer);
+      expect(update.$inc.version).toBe(1);
+    });
+
+    it("skips the text overwrite (but still merges observation_ids and bumps version) when the candidate's evidence is older, logging one stderr line", async () => {
+      const existingId = new ObjectId().toString();
+      const { db, updateOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: existingId, text: "newer corrected text", score: 0.97 }],
+        findOneResult: {
+          _id: existingId,
+          text: "newer corrected text",
+          observation_ids: ["obs-0"],
+          last_evidence_at: newer,
+        },
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const candidate = makeCandidate({ text: "stale replayed text", observation_ids: ["obs-1"] });
+      const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, older);
+
+      expect(result.action).toBe("update");
+      const [, update] = updateOne.mock.calls[0];
+      // Text must NOT regress to the stale replay; last_evidence_at must not
+      // move backward either.
+      expect(update.$set).not.toHaveProperty("text");
+      expect(update.$set).not.toHaveProperty("last_evidence_at");
+      // Provenance still accumulates and version still bumps.
+      expect(update.$set.observation_ids.sort()).toEqual(["obs-0", "obs-1"]);
+      expect(update.$inc.version).toBe(1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(String(errorSpy.mock.calls[0][0])).toContain("skipped stale text overwrite");
+
+      errorSpy.mockRestore();
+    });
+
+    it("treats a missing last_evidence_at on the existing belief as epoch 0, so the first stamped write wins", async () => {
+      const existingId = new ObjectId().toString();
+      const { db, updateOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: existingId, text: "old unstamped text", score: 0.97 }],
+        findOneResult: {
+          _id: existingId,
+          text: "old unstamped text",
+          observation_ids: ["obs-0"],
+          // no last_evidence_at field at all (pre-migration belief)
+        },
+      });
+
+      const candidate = makeCandidate({ text: "first stamped text", observation_ids: ["obs-1"] });
+      await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, older);
+
+      const [, update] = updateOne.mock.calls[0];
+      expect(update.$set.text).toBe("first stamped text");
+      expect(update.$set.last_evidence_at).toEqual(older);
+    });
+  });
 });

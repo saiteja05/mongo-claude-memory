@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import type { Db } from "mongodb";
 import {
   shouldCaptureAsHashLine,
   captureUserPromptSubmit,
+  runUserPromptSubmitHook,
   type UserPromptSubmitInput,
 } from "../src/hooks/userPromptSubmit.js";
 
@@ -118,5 +120,91 @@ describe("captureUserPromptSubmit", () => {
         { getProjectKey: () => "myrepo-abc123", writeObservation }
       )
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("runUserPromptSubmitHook", () => {
+  const fakeDb = {} as Db;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeDeps(overrides: Partial<Parameters<typeof runUserPromptSubmitHook>[1]> = {}) {
+    return {
+      getDb: vi.fn(async () => fakeDb),
+      writeObservation: vi.fn(async () => "id-1" as unknown),
+      getProjectKey: () => "myrepo-abc123",
+      hookWriteTimeoutMs: 5000,
+      ...overrides,
+    };
+  }
+
+  it("returns skipped for a non-# prompt and never touches the DB", async () => {
+    const deps = makeDeps();
+
+    const outcome = await runUserPromptSubmitHook(
+      { ...baseInput, prompt: "please fix this bug" },
+      deps
+    );
+
+    expect(outcome).toBe("skipped");
+    expect(deps.getDb).not.toHaveBeenCalled();
+    expect(deps.writeObservation).not.toHaveBeenCalled();
+  });
+
+  it("lands a hash-line write that takes 2s, well beyond the old 800ms race budget", async () => {
+    vi.useFakeTimers();
+    const writeObservation = vi.fn(
+      (_db: Db, _params: unknown) =>
+        new Promise((resolve) => setTimeout(() => resolve("id-1"), 2000))
+    );
+    const deps = makeDeps({ writeObservation: writeObservation as never });
+
+    const pending = runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    await expect(pending).resolves.toBe("written");
+    expect(writeObservation).toHaveBeenCalledTimes(1);
+    const [, params] = writeObservation.mock.calls[0] as [Db, { text: string; priority: string }];
+    expect(params.text).toBe("#remember this fact");
+    expect(params.priority).toBe("high");
+  });
+
+  it("returns timeout (without throwing) when the write exceeds hookWriteTimeoutMs", async () => {
+    vi.useFakeTimers();
+    const writeObservation = vi.fn(
+      (_db: Db, _params: unknown) =>
+        new Promise((resolve) => setTimeout(() => resolve("id-1"), 60000))
+    );
+    const deps = makeDeps({ writeObservation: writeObservation as never });
+
+    const pending = runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await expect(pending).resolves.toBe("timeout");
+  });
+
+  it("returns error (never throws) when the write rejects", async () => {
+    const writeObservation = vi.fn(async () => {
+      throw new Error("mongo is down");
+    });
+    const deps = makeDeps({ writeObservation: writeObservation as never });
+
+    await expect(
+      runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps)
+    ).resolves.toBe("error");
+  });
+
+  it("returns error (never throws) when the DB connect itself rejects", async () => {
+    const getDb = vi.fn(async () => {
+      throw new Error("connect failed");
+    });
+    const deps = makeDeps({ getDb: getDb as never });
+
+    await expect(
+      runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps)
+    ).resolves.toBe("error");
+    expect(deps.writeObservation).not.toHaveBeenCalled();
   });
 });

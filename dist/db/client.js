@@ -2,11 +2,13 @@ import { MongoClient } from "mongodb";
 import { loadConfig } from "../config.js";
 // Bounds how long a connection attempt can take before the driver gives up.
 // The hooks that call getDb() (userPromptSubmit, sessionStart, sessionEnd)
-// race their work against an internal ~800ms fail-open timeout so a memory
-// system outage never stalls the user's coding session. If the driver's
-// default 30000ms timeout were left in place, closeDb() (called from every
-// hook's finally block) would still block on the original connect() promise
-// long after the 800ms race had already timed out. 5000ms is comfortably
+// race their work against internal fail-open budgets (SESSION_START_TIMEOUT_MS
+// for the SessionStart brief fetch, HOOK_WRITE_TIMEOUT_MS for the hash-line
+// capture write, SESSION_END_TIMEOUT_MS for the transcript capture) so a
+// memory system outage never stalls the user's coding session. If the
+// driver's default 30000ms timeout were left in place, closeDb() (called from
+// every hook's finally block) would still block on the original connect()
+// promise long after those races had already timed out. 5000ms is comfortably
 // longer than a normal Atlas round trip but far shorter than the default,
 // so the worst case is a few seconds, not thirty.
 const SERVER_SELECTION_TIMEOUT_MS = 5000;

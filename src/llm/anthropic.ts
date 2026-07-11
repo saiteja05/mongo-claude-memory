@@ -15,6 +15,7 @@ interface AnthropicContentBlock {
 
 interface AnthropicMessagesResponse {
   content: AnthropicContentBlock[];
+  stop_reason?: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -63,6 +64,12 @@ export async function callWithTool(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Hard wall-clock timeout per attempt: without it a hung request would
+    // stall the consolidation run indefinitely.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.llmTimeoutMs);
+    timer.unref?.();
+
     try {
       const response = await fetch(ANTHROPIC_MESSAGES_URL, {
         method: "POST",
@@ -72,6 +79,7 @@ export async function callWithTool(
           "Content-Type": "application/json",
         },
         body,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -86,6 +94,18 @@ export async function callWithTool(
       }
 
       const json = (await response.json()) as AnthropicMessagesResponse;
+
+      // A max_tokens stop means the tool output was cut off mid-JSON: the
+      // parsed input would be silently incomplete, and marking the batch
+      // consolidated from it would lose facts. Fail the run non-retryably
+      // (a retry would truncate identically) so the batch stays claimed and
+      // reclaimable.
+      if (json.stop_reason === "max_tokens") {
+        throw new NonRetryableAnthropicError(
+          "extraction output truncated by max_tokens; reduce batch size"
+        );
+      }
+
       const toolUse = json.content.find(
         (block) => block.type === "tool_use" && block.name === toolName
       );
@@ -110,6 +130,8 @@ export async function callWithTool(
         continue;
       }
       break;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

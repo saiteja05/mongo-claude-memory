@@ -1,9 +1,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Db } from "mongodb";
 import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getDb, closeDb } from "../db/client.js";
-import { writeObservation } from "../capture/writeObservation.js";
+import { writeObservation, type WriteObservationParams } from "../capture/writeObservation.js";
+import { appendFailure } from "../telemetry/failureLog.js";
 
 export interface UserPromptSubmitInput {
   session_id: string;
@@ -76,6 +78,63 @@ export async function captureUserPromptSubmit(
   }
 }
 
+export type UserPromptSubmitHookOutcome = "skipped" | "written" | "timeout" | "error";
+
+export interface UserPromptSubmitHookDeps {
+  getDb: () => Promise<Db>;
+  writeObservation: (db: Db, params: WriteObservationParams) => Promise<unknown>;
+  getProjectKey: (cwd: string) => string;
+  hookWriteTimeoutMs: number;
+}
+
+/**
+ * Hook orchestrator with two deliberate behaviors:
+ *
+ * 1. Ordinary (non-#) prompts return "skipped" immediately, before any DB
+ *    connect, so the common path pays zero memory latency.
+ * 2. Hash-line captures are an explicit "remember this" from the user, so the
+ *    write gets a dedicated, generous budget (hookWriteTimeoutMs, default
+ *    5000ms) and is awaited to completion within it: a rare extra couple of
+ *    seconds is an acceptable price for not losing the data. The old design
+ *    raced the write against the general 800ms hook budget and then
+ *    process.exit()ed, killing the in-flight insert and silently dropping the
+ *    capture on cold connects.
+ *
+ * Never throws: timeout and error outcomes are returned, not raised, so the
+ * caller can always exit 0 (fail open).
+ */
+export async function runUserPromptSubmitHook(
+  input: UserPromptSubmitInput,
+  deps: UserPromptSubmitHookDeps
+): Promise<UserPromptSubmitHookOutcome> {
+  const promptText = resolvePromptText(input);
+  if (!shouldCaptureAsHashLine(promptText)) return "skipped";
+
+  try {
+    const write = (async () => {
+      const db = await deps.getDb();
+      const project = deps.getProjectKey(input.cwd);
+      await deps.writeObservation(db, {
+        project,
+        session_id: input.session_id,
+        source: "hash_line",
+        priority: "high",
+        text: promptText,
+      });
+      return "written" as const;
+    })();
+
+    const timeout = new Promise<"timeout">((resolve) => {
+      const timer = setTimeout(() => resolve("timeout"), deps.hookWriteTimeoutMs);
+      timer.unref?.();
+    });
+
+    return await Promise.race([write, timeout]);
+  } catch {
+    return "error";
+  }
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
@@ -94,31 +153,36 @@ async function main(): Promise<void> {
   // finally block below, never an early process.exit() inside try: exit()
   // terminates the process immediately and skips any later finally.
   try {
+    const raw = await readStdin();
+    const input = JSON.parse(raw) as UserPromptSubmitInput;
+
+    // Ordinary prompts exit right here: no config load, no DB connect, no
+    // memory latency on the common path.
+    if (!shouldCaptureAsHashLine(resolvePromptText(input))) {
+      return;
+    }
+
     if (!process.env.MDB_MCP_CONNECTION_STRING && !process.env.MEMORY_MONGODB_URI) {
       return;
     }
 
-    const raw = await readStdin();
-    const input = JSON.parse(raw) as UserPromptSubmitInput;
-
     const config = loadConfig();
 
-    const body = (async () => {
-      const db = await getDb();
-      await captureUserPromptSubmit(input, {
-        getProjectKey,
-        writeObservation: (params) => writeObservation(db, params),
-      });
-    })();
-
-    const timeout = new Promise<void>((resolve) => {
-      const timer = setTimeout(() => resolve(), config.hookInternalTimeoutMs);
-      timer.unref?.();
+    const outcome = await runUserPromptSubmitHook(input, {
+      getDb,
+      writeObservation,
+      getProjectKey,
+      hookWriteTimeoutMs: config.hookWriteTimeoutMs,
     });
 
-    await Promise.race([body.catch(() => undefined), timeout]);
-  } catch {
-    // Fail open: never let a hook throw.
+    // A hash-line capture is an explicit user request to remember; if it was
+    // lost (timeout or error), leave one line of local telemetry.
+    if (outcome === "timeout" || outcome === "error") {
+      appendFailure(`userPromptSubmit.${outcome}`, "CaptureFailed");
+    }
+  } catch (err) {
+    // Fail open: never let a hook throw. Leave one line of local telemetry.
+    appendFailure("userPromptSubmit", err);
   } finally {
     try {
       await closeDb();

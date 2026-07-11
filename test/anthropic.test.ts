@@ -5,6 +5,7 @@ const ENV_KEYS = [
   "MEMORY_MONGODB_URI",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_MODEL",
+  "LLM_TIMEOUT_MS",
 ] as const;
 
 const SECRET_API_KEY = "sk-ant-totally-secret-anthropic-key";
@@ -143,5 +144,55 @@ describe("callWithTool", () => {
       })
     ).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("throws a non-retryable error (single attempt) when the response stopped on max_tokens", async () => {
+    // The tool_use block is present but was truncated mid-output: consuming
+    // it would silently lose facts, so the call must fail without retrying
+    // (a retry would truncate identically).
+    const fetchMock = vi.fn(async () =>
+      fakeResponse(200, {
+        stop_reason: "max_tokens",
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "emit_result", input: { partial: true } },
+        ],
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { callWithTool } = await import("../src/llm/anthropic.js");
+    await expect(
+      callWithTool("system prompt", "user prompt", "emit_result", {
+        type: "object",
+        properties: {},
+      })
+    ).rejects.toThrow(/max_tokens.*reduce batch size/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a hung request once LLM_TIMEOUT_MS elapses instead of waiting forever", async () => {
+    process.env.LLM_TIMEOUT_MS = "10";
+    // A fetch that never resolves on its own; it only rejects when the
+    // caller's AbortController fires.
+    const fetchMock = vi.fn(
+      (_url: unknown, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () =>
+            reject(new DOMException("This operation was aborted", "AbortError"))
+          );
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { callWithTool } = await import("../src/llm/anthropic.js");
+    await expect(
+      callWithTool("system prompt", "user prompt", "emit_result", {
+        type: "object",
+        properties: {},
+      })
+    ).rejects.toThrow(/failed after 3 attempts/);
+    // The abort is treated as retryable, so all attempts ran and each one was
+    // cut off by the timeout rather than hanging.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

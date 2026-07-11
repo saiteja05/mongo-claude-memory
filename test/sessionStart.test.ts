@@ -13,7 +13,7 @@ describe("buildAdditionalContext", () => {
   it("combines global and project briefs when both are present", async () => {
     const result = await buildAdditionalContext(baseInput, {
       getProjectKey: () => "myrepo-abc123",
-      hookInternalTimeoutMs: 800,
+      sessionStartTimeoutMs: 800,
       getBriefs: async () => ({ global: "Global facts.", project: "Project facts." }),
     });
 
@@ -23,7 +23,7 @@ describe("buildAdditionalContext", () => {
   it("returns only the global brief when the project brief is absent", async () => {
     const result = await buildAdditionalContext(baseInput, {
       getProjectKey: () => "myrepo-abc123",
-      hookInternalTimeoutMs: 800,
+      sessionStartTimeoutMs: 800,
       getBriefs: async () => ({ global: "Global facts.", project: null }),
     });
 
@@ -33,7 +33,7 @@ describe("buildAdditionalContext", () => {
   it("returns only the project brief when the global brief is absent", async () => {
     const result = await buildAdditionalContext(baseInput, {
       getProjectKey: () => "myrepo-abc123",
-      hookInternalTimeoutMs: 800,
+      sessionStartTimeoutMs: 800,
       getBriefs: async () => ({ global: null, project: "Project facts." }),
     });
 
@@ -43,7 +43,7 @@ describe("buildAdditionalContext", () => {
   it("returns null when neither brief is present (no output)", async () => {
     const result = await buildAdditionalContext(baseInput, {
       getProjectKey: () => "myrepo-abc123",
-      hookInternalTimeoutMs: 800,
+      sessionStartTimeoutMs: 800,
       getBriefs: async () => ({ global: null, project: null }),
     });
 
@@ -55,7 +55,7 @@ describe("buildAdditionalContext", () => {
 
     const result = await buildAdditionalContext(baseInput, {
       getProjectKey: () => "myrepo-abc123",
-      hookInternalTimeoutMs: 800,
+      sessionStartTimeoutMs: 800,
       getBriefs,
     });
 

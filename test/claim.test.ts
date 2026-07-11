@@ -7,6 +7,7 @@ interface FakeDoc {
   created_at: Date;
   claimed_at?: Date | null;
   run_id?: string | null;
+  text?: string;
 }
 
 function applyFilter(doc: Record<string, unknown>, filter: Record<string, unknown>): boolean {
@@ -188,5 +189,42 @@ describe("claimBatch", () => {
     const claimed = await claimBatch(db as any, "proj-a", "run-1", 50);
 
     expect(claimed.map((d) => d._id)).toEqual(["obs-1", "obs-3"]);
+  });
+
+  it("stops accumulating candidates once the total text length would exceed the char budget", async () => {
+    const { claimBatch } = await import("../src/consolidation/claim.js");
+    const now = Date.now();
+    const collection = makeFakeObservationsCollection([
+      { _id: "obs-1", project: "proj-a", status: "pending", created_at: new Date(now - 3000), text: "a".repeat(60) },
+      { _id: "obs-2", project: "proj-a", status: "pending", created_at: new Date(now - 2000), text: "b".repeat(60) },
+      { _id: "obs-3", project: "proj-a", status: "pending", created_at: new Date(now - 1000), text: "c".repeat(60) },
+    ]);
+    const db = { collection: () => collection };
+
+    // Budget of 130 chars: obs-1 (60) + obs-2 (60) = 120 fits; adding obs-3
+    // would reach 180 > 130, so only the first two are claimed.
+    const claimed = await claimBatch(db as any, "proj-a", "run-1", 50, 130);
+
+    expect(claimed.map((d) => d._id)).toEqual(["obs-1", "obs-2"]);
+    const leftBehind = collection.state.find((d) => d._id === "obs-3")!;
+    expect(leftBehind.status).toBe("pending");
+  });
+
+  it("always claims at least one observation even when it alone exceeds the char budget", async () => {
+    const { claimBatch } = await import("../src/consolidation/claim.js");
+    const now = Date.now();
+    const collection = makeFakeObservationsCollection([
+      { _id: "obs-huge", project: "proj-a", status: "pending", created_at: new Date(now - 2000), text: "x".repeat(1000) },
+      { _id: "obs-next", project: "proj-a", status: "pending", created_at: new Date(now - 1000), text: "y".repeat(10) },
+    ]);
+    const db = { collection: () => collection };
+
+    const claimed = await claimBatch(db as any, "proj-a", "run-1", 50, 100);
+
+    // The oversized first candidate is still taken (the queue must never
+    // wedge), but nothing else joins it in the batch.
+    expect(claimed.map((d) => d._id)).toEqual(["obs-huge"]);
+    const next = collection.state.find((d) => d._id === "obs-next")!;
+    expect(next.status).toBe("pending");
   });
 });

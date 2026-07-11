@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getProjectKey } from "../src/project/projectKey.js";
+import { getProjectKey, normalizeRemoteUrl } from "../src/project/projectKey.js";
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(thisDir, "..");
@@ -45,5 +45,83 @@ describe("getProjectKey", () => {
     const dirA = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-a-"));
     const dirB = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-b-"));
     expect(getProjectKey(dirA)).not.toBe(getProjectKey(dirB));
+  });
+});
+
+describe("normalizeRemoteUrl", () => {
+  it("normalizes the ssh (scp) and https forms of the same repo to the same string", () => {
+    const ssh = normalizeRemoteUrl("git@github.com:SomeOrg/some-repo.git");
+    const https = normalizeRemoteUrl("https://github.com/SomeOrg/some-repo.git");
+    const httpsNoGit = normalizeRemoteUrl("https://github.com/SomeOrg/some-repo");
+    expect(ssh).toBe("github.com/SomeOrg/some-repo");
+    expect(https).toBe(ssh);
+    expect(httpsNoGit).toBe(ssh);
+  });
+
+  it("strips embedded credentials, trailing slashes, and lowercases only the host", () => {
+    expect(normalizeRemoteUrl("https://user:token@GitHub.com/SomeOrg/Some-Repo.git/")).toBe(
+      "github.com/SomeOrg/Some-Repo"
+    );
+    expect(normalizeRemoteUrl("  ssh://git@GitHub.com/SomeOrg/Some-Repo.git  ")).toBe(
+      "github.com/SomeOrg/Some-Repo"
+    );
+  });
+});
+
+describe("getProjectKey in remote mode (MEMORY_PROJECT_KEY_MODE=remote)", () => {
+  let savedMode: string | undefined;
+
+  beforeEach(() => {
+    savedMode = process.env.MEMORY_PROJECT_KEY_MODE;
+    process.env.MEMORY_PROJECT_KEY_MODE = "remote";
+  });
+
+  afterEach(() => {
+    if (savedMode === undefined) delete process.env.MEMORY_PROJECT_KEY_MODE;
+    else process.env.MEMORY_PROJECT_KEY_MODE = savedMode;
+  });
+
+  function makeRepoWithOrigin(originUrl: string): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-remote-"));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["remote", "add", "origin", originUrl], { cwd: dir });
+    return dir;
+  }
+
+  it("produces the same key for ssh and https clones of the same repo, regardless of local path", () => {
+    const sshClone = makeRepoWithOrigin("git@github.com:SomeOrg/some-repo.git");
+    const httpsClone = makeRepoWithOrigin("https://github.com/SomeOrg/some-repo.git");
+
+    const sshKey = getProjectKey(sshClone);
+    const httpsKey = getProjectKey(httpsClone);
+
+    expect(sshKey).toBe(httpsKey);
+    expect(sshKey).toMatch(/^some-repo-[0-9a-f]{12}$/);
+  });
+
+  it("falls back to the path-mode key when the repo has no origin remote", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-noorigin-"));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+
+    const remoteModeKey = getProjectKey(dir);
+
+    delete process.env.MEMORY_PROJECT_KEY_MODE;
+    const pathModeKey = getProjectKey(dir);
+
+    expect(remoteModeKey).toBe(pathModeKey);
+  });
+
+  it("default (unset) mode keeps the existing path-based key, even when an origin remote exists", () => {
+    const dir = makeRepoWithOrigin("git@github.com:SomeOrg/some-repo.git");
+
+    const remoteKey = getProjectKey(dir);
+
+    delete process.env.MEMORY_PROJECT_KEY_MODE;
+    const defaultKey = getProjectKey(dir);
+
+    // Path mode hashes the local .git dir, so it must differ from the
+    // remote-URL-derived key and stay stable for existing stored memory.
+    expect(defaultKey).not.toBe(remoteKey);
+    expect(defaultKey).toMatch(/^[a-zA-Z0-9._-]+-[0-9a-f]{12}$/);
   });
 });

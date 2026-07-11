@@ -100,7 +100,7 @@ export function buildServer(defaultProject: string): McpServer {
     {
       title: "Forget a belief",
       description:
-        "Tombstones one belief in place by _id, scoped to the resolved project so a caller cannot tombstone another project's belief by guessing an id. One of the two allowed direct-write exceptions in DESIGN.md 7.3.",
+        "Tombstones one belief in place by _id, scoped to the resolved project so a caller cannot tombstone another project's belief by guessing an id, then immediately recompiles the affected brief(s) so the belief stops being injected at the next SessionStart (recompiled: false in the result means the recompile failed and the next consolidation run will pick it up). Forgetting a belief in a DIFFERENT project than this server's resolved one is rejected unless MEMORY_MCP_ALLOW_CROSS_PROJECT=1 is set (destructive writes stay scoped to the project you are working in; memory_search and memory_write remain unrestricted). One of the two allowed direct-write exceptions in DESIGN.md 7.3.",
       inputSchema: {
         beliefId: z.string().min(1),
         project: z.string().optional(),
@@ -108,10 +108,25 @@ export function buildServer(defaultProject: string): McpServer {
     },
     async (args): Promise<CallToolResult> => {
       try {
+        const project = args.project ?? defaultProject;
+
+        // Cross-project forgets are a destructive write outside the project
+        // this server was launched in; keep them off by default. This is an
+        // ok-style result (not a protocol error) so the model can relay the
+        // reason instead of surfacing a tool failure.
+        if (project !== defaultProject && process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT !== "1") {
+          return jsonResult({
+            matched: false,
+            recompiled: false,
+            error:
+              "cross-project forget is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+          });
+        }
+
         const db = await getDb();
         const result = await runMemoryForget(db, {
           beliefId: args.beliefId,
-          project: args.project ?? defaultProject,
+          project,
         });
         return jsonResult(result);
       } catch (err) {

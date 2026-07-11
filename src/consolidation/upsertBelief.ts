@@ -119,7 +119,8 @@ function newBeliefDoc(
   candidate: CandidateFact,
   embedding: number[] | null,
   now: Date,
-  supersedes: string | undefined
+  supersedes: string | undefined,
+  evidenceAt: Date
 ): Document {
   const doc: Document = {
     project,
@@ -132,6 +133,7 @@ function newBeliefDoc(
     last_used: null,
     created_at: now,
     updated_at: now,
+    last_evidence_at: evidenceAt,
     version: 1,
     status: "active",
     supersedes: supersedes ?? null,
@@ -158,10 +160,12 @@ export async function upsertBelief(
   candidate: CandidateFact,
   embedding: number[] | null,
   dedupeSimilarityThreshold: number,
-  options: EmbeddingModeOptions = {}
+  options: EmbeddingModeOptions = {},
+  candidateEvidenceAt?: Date
 ): Promise<UpsertBeliefResult> {
   const collection = db.collection<Document>(BELIEFS);
   const now = new Date();
+  const evidenceAt = candidateEvidenceAt ?? now;
 
   if (candidate.supersedes_belief_id) {
     const oldFilterId = toFilterId(candidate.supersedes_belief_id);
@@ -179,7 +183,7 @@ export async function upsertBelief(
       );
 
       const inserted = await collection.insertOne(
-        newBeliefDoc(project, candidate, embedding, now, candidate.supersedes_belief_id)
+        newBeliefDoc(project, candidate, embedding, now, candidate.supersedes_belief_id, evidenceAt)
       );
       return { beliefId: String(inserted.insertedId), action: "supersede" };
     }
@@ -207,14 +211,34 @@ export async function upsertBelief(
     const existingText = typeof existing?.text === "string" ? (existing!.text as string) : similar.text;
     const textChanged = existingText !== candidate.text;
 
+    // Evidence-recency guard: only let the candidate's text overwrite the
+    // existing text when the candidate's evidence is at least as new as the
+    // evidence already backing the belief. Without this, replaying an OLD
+    // observation (crash reprocessing, delayed batch) through the dedupe
+    // path would regress a belief that a newer correction already updated.
+    // A belief without a last_evidence_at stamp (written before this field
+    // existed) is treated as epoch 0, so the first stamped write wins.
+    const existingEvidenceAt =
+      existing?.last_evidence_at instanceof Date ? existing.last_evidence_at : new Date(0);
+    const evidenceIsFresh = evidenceAt.getTime() >= existingEvidenceAt.getTime();
+
+    // observation_ids always merge and version always bumps, regardless of
+    // evidence freshness: provenance accumulates even from stale replays.
+    const setFields: Document = {
+      observation_ids: mergedObservationIds,
+      updated_at: now,
+    };
+    if (evidenceIsFresh) {
+      setFields.text = textChanged ? candidate.text : existingText;
+      setFields.last_evidence_at = evidenceAt;
+    } else if (textChanged) {
+      console.error(`[consolidate] skipped stale text overwrite for belief ${similar._id}`);
+    }
+
     const updateResult = await collection.updateOne(
       { _id: existingFilterId, status: "active" },
       {
-        $set: {
-          text: textChanged ? candidate.text : existingText,
-          observation_ids: mergedObservationIds,
-          updated_at: now,
-        },
+        $set: setFields,
         $inc: { version: 1 },
       }
     );
@@ -230,7 +254,7 @@ export async function upsertBelief(
   }
 
   const inserted = await collection.insertOne(
-    newBeliefDoc(project, candidate, embedding, now, undefined)
+    newBeliefDoc(project, candidate, embedding, now, undefined, evidenceAt)
   );
   return { beliefId: String(inserted.insertedId), action: "insert" };
 }

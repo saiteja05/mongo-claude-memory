@@ -229,7 +229,7 @@ describe("compileBrief", () => {
     expect(replacement.content).toBe("Fact without a trailing period.");
   });
 
-  it("treats a last_used timestamp in the future as maximally recent (recency score 1)", async () => {
+  it("treats a last_evidence_at timestamp in the future as maximally recent (recency score 1)", async () => {
     const { compileBrief } = await import("../src/consolidation/compileBrief.js");
     const future = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // one year from now
     const beliefs = [
@@ -240,16 +240,16 @@ describe("compileBrief", () => {
         text: "Belief with no recency signal.",
         importance: 0.5,
         use_count: 0,
-        last_used: null,
+        last_evidence_at: null,
       },
       {
         _id: "b-future",
         project: "proj",
         scope: "project",
-        text: "Belief with a future last_used.",
+        text: "Belief with a future last_evidence_at.",
         importance: 0.5,
         use_count: 0,
-        last_used: future,
+        last_evidence_at: future,
       },
     ];
     const { db, replaceOne } = makeFakeDb(beliefs);
@@ -263,26 +263,26 @@ describe("compileBrief", () => {
     expect(replacement.belief_ids).toEqual(["b-future", "b-no-recency"]);
   });
 
-  it("degrades an unparseable last_used to a recency score of 0 instead of throwing or producing NaN", async () => {
+  it("degrades an unparseable last_evidence_at to a recency score of 0 instead of throwing or producing NaN", async () => {
     const { compileBrief } = await import("../src/consolidation/compileBrief.js");
     const beliefs = [
       {
         _id: "b-invalid-recency",
         project: "proj",
         scope: "project",
-        text: "Belief with an invalid last_used.",
+        text: "Belief with an invalid last_evidence_at.",
         importance: 0.5,
         use_count: 0,
-        last_used: "not-a-real-date",
+        last_evidence_at: "not-a-real-date",
       },
       {
         _id: "b-valid-recency",
         project: "proj",
         scope: "project",
-        text: "Belief with a valid, recent last_used.",
+        text: "Belief with a valid, recent last_evidence_at.",
         importance: 0.5,
         use_count: 0,
-        last_used: new Date(),
+        last_evidence_at: new Date(),
       },
     ];
     const { db, replaceOne } = makeFakeDb(beliefs);
@@ -296,6 +296,43 @@ describe("compileBrief", () => {
     const replacement = replaceOne.mock.calls[0][1] as { content: string; belief_ids: string[] };
     expect(replacement.belief_ids).toEqual(["b-valid-recency", "b-invalid-recency"]);
     expect(replacement.content).not.toMatch(/NaN/);
+  });
+
+  it("ranks recency by evidence (last_evidence_at, falling back to updated_at), not by last_used", async () => {
+    const { compileBrief } = await import("../src/consolidation/compileBrief.js");
+    const recent = new Date();
+    const old = new Date(Date.now() - 300 * 24 * 60 * 60 * 1000);
+    const beliefs = [
+      {
+        _id: "b-recently-used-stale-evidence",
+        project: "proj",
+        scope: "project",
+        text: "Recently surfaced but evidence is stale.",
+        importance: 0.5,
+        use_count: 0,
+        last_used: recent, // must NOT count toward recency anymore
+        last_evidence_at: old,
+      },
+      {
+        _id: "b-fresh-evidence",
+        project: "proj",
+        scope: "project",
+        text: "Fresh evidence, never surfaced by search.",
+        importance: 0.5,
+        use_count: 0,
+        last_used: null,
+        updated_at: recent, // used as the fallback when last_evidence_at is absent
+      },
+    ];
+    const { db, replaceOne } = makeFakeDb(beliefs);
+
+    await compileBrief(db as any, "proj");
+
+    const replacement = replaceOne.mock.calls[0][1] as { belief_ids: string[] };
+    expect(replacement.belief_ids).toEqual([
+      "b-fresh-evidence",
+      "b-recently-used-stale-evidence",
+    ]);
   });
 
   it("renders an empty brief with no belief_ids and no dropped-belief warning when nothing matches", async () => {

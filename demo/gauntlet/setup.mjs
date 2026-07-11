@@ -117,7 +117,7 @@ async function writeEngineSettings(root, cfgDir) {
     hooks: {
       SessionStart: [
         {
-          matcher: "startup|compact|resume",
+          matcher: "startup|resume|clear|compact",
           hooks: [{ type: "command", command: hookCmd("sessionStart.js") }],
         },
       ],

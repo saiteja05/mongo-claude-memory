@@ -197,18 +197,60 @@ describe("buildServer", () => {
       expect(params).toMatchObject({ beliefId: "507f1f77bcf86cd799439011", project: DEFAULT_PROJECT });
     });
 
-    it("passes an explicit args.project through instead of the default", async () => {
-      runMemoryForget.mockResolvedValue({ matched: true });
+    it("accepts an explicit args.project equal to the default (same-project forget works)", async () => {
+      runMemoryForget.mockResolvedValue({ matched: true, recompiled: true });
 
       await withClient(DEFAULT_PROJECT, async (client) => {
         await client.callTool({
           name: "memory_forget",
-          arguments: { beliefId: "507f1f77bcf86cd799439011", project: "explicit-project" },
+          arguments: { beliefId: "507f1f77bcf86cd799439011", project: DEFAULT_PROJECT },
         });
       });
 
       const [, params] = runMemoryForget.mock.calls[0];
-      expect(params).toMatchObject({ project: "explicit-project" });
+      expect(params).toMatchObject({ project: DEFAULT_PROJECT });
+    });
+
+    it("rejects a cross-project forget by default without touching the DB", async () => {
+      const result = await withClient(DEFAULT_PROJECT, (client) =>
+        client.callTool({
+          name: "memory_forget",
+          arguments: { beliefId: "507f1f77bcf86cd799439011", project: "some-other-project" },
+        })
+      );
+
+      expect(result.isError).toBeFalsy(); // ok-style result, not a protocol error
+      expect(result.structuredContent).toMatchObject({
+        matched: false,
+        recompiled: false,
+        error: "cross-project forget is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+      });
+      expect(runMemoryForget).not.toHaveBeenCalled();
+      expect(getDb).not.toHaveBeenCalled();
+    });
+
+    it("allows a cross-project forget when MEMORY_MCP_ALLOW_CROSS_PROJECT=1", async () => {
+      const saved = process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+      process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = "1";
+      try {
+        runMemoryForget.mockResolvedValue({ matched: true, recompiled: true });
+
+        await withClient(DEFAULT_PROJECT, async (client) => {
+          await client.callTool({
+            name: "memory_forget",
+            arguments: { beliefId: "507f1f77bcf86cd799439011", project: "some-other-project" },
+          });
+        });
+
+        const [, params] = runMemoryForget.mock.calls[0];
+        expect(params).toMatchObject({ project: "some-other-project" });
+      } finally {
+        if (saved === undefined) {
+          delete process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+        } else {
+          process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = saved;
+        }
+      }
     });
 
     it("returns structuredContent matching what runMemoryForget resolved, on success", async () => {

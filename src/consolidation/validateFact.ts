@@ -31,8 +31,12 @@ const DENY_LIST: RegExp[] = [
   /henceforth/i,
   /\bforget\b[^.]{0,30}\b(everything|all|previous|prior|earlier)\b/i,
   /\bwhenever\b[^.]{0,60}\b(asked|is asked|someone asks|anyone asks)\b/i,
+  // NOTE: a standalone /\brecommended (package|library|dependency|module|
+  // tool)\b/ pattern used to live here and was removed: it false-positived
+  // on legitimate facts like "pnpm is the recommended package manager". The
+  // recommend+install/download pattern below still catches install-steering
+  // injections, which is the actual threat that pattern existed for.
   /\b(recommend|suggest|advise)(ed|s|ing)?\b[^.]{0,80}\b(install(ing|ed|s)?|download(ing|ed|s)?)\b/i,
-  /\brecommended (package|library|dependency|module|tool)\b/i,
   /\bevery (user|person|developer|customer) who\b/i,
 ];
 

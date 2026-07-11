@@ -21,28 +21,51 @@ export async function reclaimStale(
   return result.modifiedCount;
 }
 
+// Default character budget for one extraction batch, matching config.ts's
+// CONSOLIDATION_BATCH_MAX_CHARS default. batchSize alone counts observations,
+// but a transcript observation can be 50k chars, so a count-only bound could
+// build an extraction prompt past the model's context limit.
+const DEFAULT_BATCH_MAX_CHARS = 300000;
+
 /**
- * Claims up to batchSize pending observations for a project. Always includes
- * status:"pending" in the update filter (never trusts the prior find() result
- * to still be valid) and re-fetches only documents that this run_id actually
- * claimed, so a race with another claimer never returns a doc we do not
- * actually own.
+ * Claims up to batchSize pending observations for a project, bounded by both
+ * a document count (batchSize) and a total text-length budget (maxChars).
+ * Candidates are accumulated oldest-first until adding the next one would
+ * exceed maxChars; at least one candidate is always taken regardless of its
+ * size, so a single oversized observation can never wedge the queue.
+ *
+ * Always includes status:"pending" in the update filter (never trusts the
+ * prior find() result to still be valid) and re-fetches only documents that
+ * this run_id actually claimed, so a race with another claimer never returns
+ * a doc we do not actually own.
  */
 export async function claimBatch(
   db: Db,
   project: string,
   runId: string,
-  batchSize: number
+  batchSize: number,
+  maxChars: number = DEFAULT_BATCH_MAX_CHARS
 ): Promise<Observation[]> {
   const collection = db.collection<Observation>(OBSERVATIONS);
 
   const candidates = await collection
-    .find({ project, status: "pending" }, { projection: { _id: 1 } })
+    .find({ project, status: "pending" }, { projection: { _id: 1, text: 1 } })
     .sort({ created_at: 1 })
     .limit(batchSize)
     .toArray();
 
-  const ids = candidates.map((doc) => doc._id);
+  const selected: typeof candidates = [];
+  let totalChars = 0;
+  for (const candidate of candidates) {
+    const length = typeof candidate.text === "string" ? candidate.text.length : 0;
+    if (selected.length > 0 && totalChars + length > maxChars) {
+      break;
+    }
+    selected.push(candidate);
+    totalChars += length;
+  }
+
+  const ids = selected.map((doc) => doc._id);
   if (ids.length === 0) {
     return [];
   }

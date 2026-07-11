@@ -11,6 +11,8 @@ const ENV_KEYS = [
   "BRIEF_CORE_TOKEN_CAP",
   "BRIEF_PROJECT_TOKEN_CAP",
   "HOOK_INTERNAL_TIMEOUT_MS",
+  "SESSION_START_TIMEOUT_MS",
+  "HOOK_WRITE_TIMEOUT_MS",
   "OBSERVATION_TTL_DAYS",
   "SESSION_END_TIMEOUT_MS",
   "ANTHROPIC_API_KEY",
@@ -93,10 +95,47 @@ describe("loadConfig", () => {
     expect(config.briefCoreTokenCap).toBe(800);
     expect(config.briefProjectTokenCap).toBe(1200);
     expect(config.hookInternalTimeoutMs).toBe(800);
+    expect(config.sessionStartTimeoutMs).toBe(3000);
+    expect(config.hookWriteTimeoutMs).toBe(5000);
     expect(config.observationTtlDays).toBe(30);
     expect(config.sessionEndTimeoutMs).toBe(5000);
+    expect(config.llmTimeoutMs).toBe(60000);
+    expect(config.consolidationBatchMaxChars).toBe(300000);
     expect(config.voyageApiKey).toBeUndefined();
     expect(config.voyageBaseUrl).toBe("https://api.voyageai.com");
+  });
+
+  it("sessionStartTimeoutMs falls back to an explicitly tuned HOOK_INTERNAL_TIMEOUT_MS", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.HOOK_INTERNAL_TIMEOUT_MS = "1200";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.sessionStartTimeoutMs).toBe(1200);
+    expect(config.hookInternalTimeoutMs).toBe(1200);
+  });
+
+  it("SESSION_START_TIMEOUT_MS wins over HOOK_INTERNAL_TIMEOUT_MS when both are set", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.HOOK_INTERNAL_TIMEOUT_MS = "1200";
+    process.env.SESSION_START_TIMEOUT_MS = "2500";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.sessionStartTimeoutMs).toBe(2500);
+    expect(config.hookInternalTimeoutMs).toBe(1200);
+  });
+
+  it("respects an explicit HOOK_WRITE_TIMEOUT_MS override", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.HOOK_WRITE_TIMEOUT_MS = "9000";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.hookWriteTimeoutMs).toBe(9000);
   });
 
   it("respects an explicit VOYAGE_BASE_URL override", async () => {

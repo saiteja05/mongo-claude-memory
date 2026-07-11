@@ -23,13 +23,13 @@ function scopeRank(scope: unknown): number {
   return 2; // archive or unknown scope should never reach an active-only query
 }
 
-function recencyScore(lastUsed: unknown): number {
-  if (!lastUsed) return 0;
-  const timestamp = new Date(lastUsed as string | Date).getTime();
-  if (!Number.isFinite(timestamp)) return 0;
-  const daysSinceUse = (Date.now() - timestamp) / (24 * 60 * 60 * 1000);
-  if (daysSinceUse < 0) return 1;
-  return 1 / (1 + daysSinceUse);
+function recencyScore(timestamp: unknown): number {
+  if (!timestamp) return 0;
+  const millis = new Date(timestamp as string | Date).getTime();
+  if (!Number.isFinite(millis)) return 0;
+  const daysSince = (Date.now() - millis) / (24 * 60 * 60 * 1000);
+  if (daysSince < 0) return 1;
+  return 1 / (1 + daysSince);
 }
 
 function useCountScore(useCount: unknown): number {
@@ -39,9 +39,14 @@ function useCountScore(useCount: unknown): number {
 
 function rankScore(belief: Document): number {
   const importance = typeof belief.importance === "number" ? belief.importance : 0;
+  // Recency is EVIDENCE recency (last_evidence_at, falling back to
+  // updated_at), not last_used: last_used only moves on the rare occasions a
+  // belief is surfaced by memory_search, so ranking on it left the freshness
+  // signal effectively dead. Evidence recency moves whenever new supporting
+  // observations arrive, which is the freshness that matters for a brief.
   return (
     importance * WEIGHT_IMPORTANCE +
-    recencyScore(belief.last_used) * WEIGHT_RECENCY +
+    recencyScore(belief.last_evidence_at ?? belief.updated_at) * WEIGHT_RECENCY +
     useCountScore(belief.use_count) * WEIGHT_USE_COUNT
   );
 }

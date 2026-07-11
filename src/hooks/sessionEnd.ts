@@ -4,10 +4,23 @@ import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getDb, closeDb } from "../db/client.js";
 import { writeObservation } from "../capture/writeObservation.js";
+import { TRANSCRIPT_TAIL_LENGTH } from "../capture/constants.js";
+import { getBriefs, type BriefResult } from "../briefs/fetchBrief.js";
+import { appendFailure } from "../telemetry/failureLog.js";
 
-// Cheap rolling summary per DESIGN.md 5.1: the last N characters of the raw
-// transcript file, not a parse of Claude Code's internal JSONL schema.
-const TRANSCRIPT_TAIL_LENGTH = 50000;
+// Cheap rolling summary per DESIGN.md 5.1: the last TRANSCRIPT_TAIL_LENGTH
+// characters of the raw transcript file (shared constant in
+// capture/constants.ts so writeObservation's clamp cannot silently diverge),
+// not a parse of Claude Code's internal JSONL schema.
+
+// Budget for the pre-capture brief fetch used to strip injected brief content
+// from the transcript tail. Deliberately short: stripping is an optimization
+// against the echo loop, not a requirement, so a slow fetch just skips it.
+const BRIEF_STRIP_TIMEOUT_MS = 1500;
+
+// Brief contents shorter than this are never stripped: removing tiny common
+// substrings from the transcript would mangle unrelated text.
+const MIN_BRIEF_STRIP_LENGTH = 40;
 
 export interface SessionEndInput {
   session_id: string;
@@ -29,13 +42,40 @@ export interface SessionEndDeps {
     text: string;
   }) => Promise<unknown>;
   getProjectKey: (cwd: string) => string;
+  /**
+   * Optional: fetches the currently injected briefs so their content can be
+   * stripped from the transcript tail before capture (echo-loop defense: the
+   * injected brief is memory OUTPUT, and re-observing it would feed it back
+   * into consolidation as if it were new evidence). Fail-open: any error or
+   * absence just skips stripping.
+   */
+  getBriefs?: (projectKey: string, timeoutMs: number) => Promise<BriefResult>;
 }
 
 /**
- * Pure-ish core: reads the transcript tail and, if there is anything to
- * capture, writes one observation. Never throws; any failure (missing
- * transcript, writeObservation rejecting) is swallowed so the hook can always
- * fail open per DESIGN.md section 10.
+ * Removes every exact occurrence of each brief's content from the transcript
+ * tail. Only strips non-empty strings of length >= MIN_BRIEF_STRIP_LENGTH so
+ * tiny common substrings can never be stripped out of unrelated text. Pure
+ * and cheap: exact string splitting, no regex compilation on untrusted input.
+ */
+export function stripInjectedBriefs(
+  tail: string,
+  briefContents: Array<string | null | undefined>
+): string {
+  let result = tail;
+  for (const content of briefContents) {
+    if (typeof content !== "string" || content.length < MIN_BRIEF_STRIP_LENGTH) continue;
+    result = result.split(content).join("");
+  }
+  return result;
+}
+
+/**
+ * Pure-ish core: reads the transcript tail, strips any injected brief content
+ * from it (echo-loop defense) and, if there is anything left to capture,
+ * writes one observation. Never throws; any failure (missing transcript,
+ * writeObservation rejecting) is swallowed so the hook can always fail open
+ * per DESIGN.md section 10.
  */
 export async function captureSessionEnd(
   input: SessionEndInput,
@@ -46,12 +86,25 @@ export async function captureSessionEnd(
     if (!tail) return;
 
     const project = deps.getProjectKey(input.cwd);
+
+    let briefs: BriefResult = { global: null, project: null };
+    if (deps.getBriefs) {
+      try {
+        briefs = await deps.getBriefs(project, BRIEF_STRIP_TIMEOUT_MS);
+      } catch {
+        // Fail open: stripping is best-effort, capture proceeds unstripped.
+      }
+    }
+
+    const text = stripInjectedBriefs(tail, [briefs.global, briefs.project]);
+    if (!text.trim()) return;
+
     await deps.writeObservation({
       project,
       session_id: input.session_id,
       source: "transcript",
       priority: "normal",
-      text: tail,
+      text,
     });
   } catch {
     // Fail open: a hook must never surface a memory-path error to the user.
@@ -125,6 +178,7 @@ async function main(): Promise<void> {
     const deps: SessionEndDeps = {
       readTranscriptTail,
       getProjectKey,
+      getBriefs,
       writeObservation: async (params) => {
         const db = await getDb();
         return writeObservation(db, params);
@@ -132,8 +186,9 @@ async function main(): Promise<void> {
     };
 
     await captureSessionEndWithTimeout(input, deps, config.sessionEndTimeoutMs);
-  } catch {
-    // Fail open: never let a hook throw.
+  } catch (err) {
+    // Fail open: never let a hook throw. Leave one line of local telemetry.
+    appendFailure("sessionEnd", err);
   } finally {
     try {
       await closeDb();

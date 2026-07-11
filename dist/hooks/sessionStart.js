@@ -4,6 +4,7 @@ import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getBriefs } from "../briefs/fetchBrief.js";
 import { closeDb } from "../db/client.js";
+import { appendFailure } from "../telemetry/failureLog.js";
 /**
  * Pure logic: combines the global and project briefs (if any) into the
  * additionalContext string, or returns null if there is nothing to inject.
@@ -13,7 +14,7 @@ export async function buildAdditionalContext(input, deps) {
     const projectKey = deps.getProjectKey(input.cwd);
     let briefs;
     try {
-        briefs = await deps.getBriefs(projectKey, deps.hookInternalTimeoutMs);
+        briefs = await deps.getBriefs(projectKey, deps.sessionStartTimeoutMs);
     }
     catch {
         briefs = { global: null, project: null };
@@ -53,12 +54,20 @@ async function main() {
         const raw = await readStdin();
         const input = JSON.parse(raw);
         const config = loadConfig();
+        const startedAt = Date.now();
         const context = await buildAdditionalContext(input, {
             getBriefs,
             getProjectKey,
-            hookInternalTimeoutMs: config.hookInternalTimeoutMs,
+            sessionStartTimeoutMs: config.sessionStartTimeoutMs,
         });
         if (!context) {
+            // Cheap timeout detection: getBriefs resolves empty on both "no brief"
+            // and "timed out", but only the timeout takes the full budget. An
+            // empty result that consumed the whole budget is almost certainly the
+            // race resolving empty due to timeout, worth one telemetry line.
+            if (Date.now() - startedAt >= config.sessionStartTimeoutMs) {
+                appendFailure("sessionStart.timeout", "BriefFetchTimeout");
+            }
             return;
         }
         process.stdout.write(JSON.stringify({
@@ -68,8 +77,9 @@ async function main() {
             },
         }));
     }
-    catch {
-        // Fail open: never let a hook throw.
+    catch (err) {
+        // Fail open: never let a hook throw. Leave one line of local telemetry.
+        appendFailure("sessionStart", err);
     }
     finally {
         try {

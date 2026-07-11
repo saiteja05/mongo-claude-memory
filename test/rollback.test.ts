@@ -63,13 +63,19 @@ function makeFakeDb(observations: FakeObservation[], beliefs: FakeBelief[]) {
         },
       };
     },
-    async updateOne(filter: { _id: unknown; version?: number }, update: any) {
+    async updateOne(filter: { _id: unknown; version?: number; status?: string }, update: any) {
       const doc = beliefState.find((b) => matchId(b._id, filter._id));
       if (!doc) return { matchedCount: 0, modifiedCount: 0 };
       // CAS guard: when the filter includes a version, it must still match
       // the document's current version (simulates real MongoDB behavior for
       // the rollback.ts tombstone write's compare-and-swap filter).
       if (filter.version !== undefined && doc.version !== filter.version) {
+        return { matchedCount: 0, modifiedCount: 0 };
+      }
+      // Status guard: the restore path filters on status "archived" so a
+      // tombstoned (user-forgotten) or already-active belief is never
+      // resurrected by a rollback.
+      if (filter.status !== undefined && doc.status !== filter.status) {
         return { matchedCount: 0, modifiedCount: 0 };
       }
       if (update.$set) Object.assign(doc, update.$set);
@@ -366,13 +372,132 @@ describe("runRollback", () => {
 
     expect(result.revertedBeliefs).toEqual([beliefId]);
     // toFilterId's catch branch falls back to the raw string, so the restore
-    // write's filter is on that string id (no matching belief exists in this
-    // fixture, so the write itself is a no-op), but the caller does not throw
-    // and still reports the raw string as restored.
-    expect(result.restoredBeliefs).toEqual(["not-a-valid-objectid"]);
+    // write's filter is on that string id. No matching belief exists in this
+    // fixture, so the guarded restore matches nothing: the caller does not
+    // throw, and the unrestorable target is reported for manual review
+    // rather than falsely listed as restored.
+    expect(result.restoredBeliefs).toEqual([]);
+    expect(result.needsManualReview).toEqual([
+      {
+        beliefId: "not-a-valid-objectid",
+        observationIds: [],
+        runObservationIds: [],
+        reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+      },
+    ]);
 
     const belief = beliefState.find((b) => String(b._id) === beliefId)!;
     expect(belief.status).toBe("tombstoned");
+  });
+
+  it("restores an archived superseded belief with a version bump and a status-archived filter", async () => {
+    const oldBeliefId = new ObjectId().toString();
+    const newBeliefId = new ObjectId().toString();
+    const { db, beliefState } = makeFakeDb(
+      [{ _id: "obs-1", run_id: "run-a", status: "consolidated" }],
+      [
+        {
+          _id: oldBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "archived",
+          observation_ids: ["obs-0"],
+          supersedes: null,
+          version: 3,
+        },
+        {
+          _id: newBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "active",
+          observation_ids: ["obs-1"],
+          supersedes: oldBeliefId,
+          version: 1,
+        },
+      ]
+    );
+
+    const result = await runRollback(db as any, "run-a", makeDeps());
+
+    expect(result.restoredBeliefs).toEqual([oldBeliefId]);
+    expect(result.needsManualReview).toEqual([]);
+    const restored = beliefState.find((b) => String(b._id) === oldBeliefId)!;
+    expect(restored.status).toBe("active");
+    // Every mutation bumps version, the restore included.
+    expect(restored.version).toBe(4);
+  });
+
+  it("never resurrects a tombstoned (user-forgotten) superseded belief, reporting it for manual review instead", async () => {
+    const oldBeliefId = new ObjectId().toString();
+    const newBeliefId = new ObjectId().toString();
+    const { db, beliefState } = makeFakeDb(
+      [{ _id: "obs-1", run_id: "run-a", status: "consolidated" }],
+      [
+        {
+          _id: oldBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "tombstoned",
+          observation_ids: ["obs-0"],
+          supersedes: null,
+          version: 2,
+        },
+        {
+          _id: newBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "active",
+          observation_ids: ["obs-1"],
+          supersedes: oldBeliefId,
+          version: 1,
+        },
+      ]
+    );
+
+    const result = await runRollback(db as any, "run-a", makeDeps());
+
+    expect(result.restoredBeliefs).toEqual([]);
+    expect(result.needsManualReview).toEqual([
+      {
+        beliefId: oldBeliefId,
+        observationIds: [],
+        runObservationIds: [],
+        reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+      },
+    ]);
+    const tombstoned = beliefState.find((b) => String(b._id) === oldBeliefId)!;
+    expect(tombstoned.status).toBe("tombstoned");
+  });
+
+  it("reports a missing superseded belief for manual review instead of listing it as restored", async () => {
+    const missingId = new ObjectId().toString();
+    const newBeliefId = new ObjectId().toString();
+    const { db } = makeFakeDb(
+      [{ _id: "obs-1", run_id: "run-a", status: "consolidated" }],
+      [
+        {
+          _id: newBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "active",
+          observation_ids: ["obs-1"],
+          supersedes: missingId,
+          version: 1,
+        },
+      ]
+    );
+
+    const result = await runRollback(db as any, "run-a", makeDeps());
+
+    expect(result.restoredBeliefs).toEqual([]);
+    expect(result.needsManualReview).toEqual([
+      {
+        beliefId: missingId,
+        observationIds: [],
+        runObservationIds: [],
+        reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+      },
+    ]);
   });
 
   it("excludes a reverted belief from the recompile scopes when its scope is neither 'core' nor 'project'", async () => {

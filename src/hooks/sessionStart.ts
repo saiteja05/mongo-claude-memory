@@ -4,6 +4,7 @@ import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getBriefs, type BriefResult } from "../briefs/fetchBrief.js";
 import { closeDb } from "../db/client.js";
+import { appendFailure } from "../telemetry/failureLog.js";
 
 export interface SessionStartInput {
   session_id: string;
@@ -17,7 +18,7 @@ export interface SessionStartInput {
 export interface SessionStartDeps {
   getBriefs: (projectKey: string, timeoutMs: number) => Promise<BriefResult>;
   getProjectKey: (cwd: string) => string;
-  hookInternalTimeoutMs: number;
+  sessionStartTimeoutMs: number;
 }
 
 /**
@@ -33,7 +34,7 @@ export async function buildAdditionalContext(
 
   let briefs: BriefResult;
   try {
-    briefs = await deps.getBriefs(projectKey, deps.hookInternalTimeoutMs);
+    briefs = await deps.getBriefs(projectKey, deps.sessionStartTimeoutMs);
   } catch {
     briefs = { global: null, project: null };
   }
@@ -78,13 +79,21 @@ async function main(): Promise<void> {
 
     const config = loadConfig();
 
+    const startedAt = Date.now();
     const context = await buildAdditionalContext(input, {
       getBriefs,
       getProjectKey,
-      hookInternalTimeoutMs: config.hookInternalTimeoutMs,
+      sessionStartTimeoutMs: config.sessionStartTimeoutMs,
     });
 
     if (!context) {
+      // Cheap timeout detection: getBriefs resolves empty on both "no brief"
+      // and "timed out", but only the timeout takes the full budget. An
+      // empty result that consumed the whole budget is almost certainly the
+      // race resolving empty due to timeout, worth one telemetry line.
+      if (Date.now() - startedAt >= config.sessionStartTimeoutMs) {
+        appendFailure("sessionStart.timeout", "BriefFetchTimeout");
+      }
       return;
     }
 
@@ -96,8 +105,9 @@ async function main(): Promise<void> {
         },
       })
     );
-  } catch {
-    // Fail open: never let a hook throw.
+  } catch (err) {
+    // Fail open: never let a hook throw. Leave one line of local telemetry.
+    appendFailure("sessionStart", err);
   } finally {
     try {
       await closeDb();

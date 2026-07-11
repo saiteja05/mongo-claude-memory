@@ -2,10 +2,7 @@ import type { Db, Document } from "mongodb";
 import { OBSERVATIONS } from "../db/schema.js";
 import type { ObservationSource, ObservationPriority } from "../db/schema.js";
 import { loadConfig } from "../config.js";
-
-// Raw capture text is unbounded (transcript tails, pasted content); cap it so
-// a single observation can never blow past a sane document size.
-const MAX_TEXT_LENGTH = 20000;
+import { MAX_OBSERVATION_TEXT_LENGTH } from "./constants.js";
 
 export interface WriteObservationParams {
   project: string;
@@ -25,7 +22,15 @@ export async function writeObservation(
   db: Db,
   params: WriteObservationParams
 ): Promise<unknown> {
-  const text = params.text.slice(0, MAX_TEXT_LENGTH);
+  // Raw capture text is unbounded (transcript tails, pasted content); clamp
+  // it so a single observation can never blow past a sane document size. The
+  // clamp is source-aware: a transcript tail keeps its END (the most recent
+  // content is the most valuable), while user-authored captures (remember,
+  // hash_line, mcp_write) keep their BEGINNING (the user led with the point).
+  const text =
+    params.source === "transcript"
+      ? params.text.slice(-MAX_OBSERVATION_TEXT_LENGTH)
+      : params.text.slice(0, MAX_OBSERVATION_TEXT_LENGTH);
 
   const doc: Document = {
     project: params.project,

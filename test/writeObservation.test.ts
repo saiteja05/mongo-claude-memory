@@ -77,11 +77,13 @@ describe("writeObservation", () => {
     expect(expiresMs).toBeLessThan(expectedMax);
   });
 
-  it("truncates overly long text to the max length", async () => {
+  it("keeps the END of an over-length transcript observation (the most recent content matters)", async () => {
     const { writeObservation } = await import("../src/capture/writeObservation.js");
     const { db, insertOne } = makeFakeDb();
 
-    const longText = "a".repeat(30000);
+    // 10k of "a" followed by 50k of "b": the clamp must keep the last 50k
+    // (all "b"), never the first 50k.
+    const longText = "a".repeat(10000) + "b".repeat(50000);
     await writeObservation(db as any, {
       project: "myrepo-abc",
       session_id: "sess-1",
@@ -91,7 +93,38 @@ describe("writeObservation", () => {
     });
 
     const doc = insertOne.mock.calls[0][0];
-    expect((doc.text as string).length).toBe(20000);
+    const text = doc.text as string;
+    expect(text.length).toBe(50000);
+    expect(text).toBe("b".repeat(50000));
+  });
+
+  it("keeps the BEGINNING of an over-length user-authored observation (remember)", async () => {
+    const { writeObservation } = await import("../src/capture/writeObservation.js");
+    const { db, insertOne } = makeFakeDb();
+
+    // 50k of "a" followed by 10k of "b": user-authored captures lead with the
+    // point, so the clamp must keep the first 50k (all "a").
+    const longText = "a".repeat(50000) + "b".repeat(10000);
+    await writeObservation(db as any, {
+      project: "myrepo-abc",
+      session_id: "sess-1",
+      source: "remember",
+      priority: "high",
+      text: longText,
+    });
+
+    const doc = insertOne.mock.calls[0][0];
+    const text = doc.text as string;
+    expect(text.length).toBe(50000);
+    expect(text).toBe("a".repeat(50000));
+  });
+
+  it("shares its clamp constant with sessionEnd's transcript tail length so they cannot diverge", async () => {
+    const { MAX_OBSERVATION_TEXT_LENGTH, TRANSCRIPT_TAIL_LENGTH } = await import(
+      "../src/capture/constants.js"
+    );
+    expect(MAX_OBSERVATION_TEXT_LENGTH).toBe(TRANSCRIPT_TAIL_LENGTH);
+    expect(TRANSCRIPT_TAIL_LENGTH).toBe(50000);
   });
 
   it("returns the inserted id", async () => {

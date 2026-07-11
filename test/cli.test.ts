@@ -44,7 +44,7 @@ vi.mock("../src/consolidation/dryRun.js", () => ({
 vi.mock("../src/consolidation/rollback.js", () => ({ runRollback, formatRollbackReport }));
 vi.mock("../src/consolidation/status.js", () => ({ getStatusReport, formatStatusReport }));
 
-const { main } = await import("../src/consolidation/cli.js");
+const { main, runDoctor, findPendingProjects } = await import("../src/consolidation/cli.js");
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -56,13 +56,17 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     briefCoreTokenCap: 800,
     briefProjectTokenCap: 1200,
     hookInternalTimeoutMs: 800,
+    sessionStartTimeoutMs: 3000,
+    hookWriteTimeoutMs: 5000,
     observationTtlDays: 30,
     sessionEndTimeoutMs: 5000,
     anthropicApiKey: "anthropic-key",
     anthropicModel: "claude-sonnet-5",
     llmProvider: "anthropic",
+    llmTimeoutMs: 60000,
     leaseMs: 300000,
     claimBatchSize: 50,
+    consolidationBatchMaxChars: 300000,
     reclaimAfterMs: 600000,
     beliefsContextLimit: 30,
     dedupeSimilarityThreshold: 0.93,
@@ -282,5 +286,102 @@ describe("main (--rollback subcommand)", () => {
     expect(runRollback).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("findPendingProjects", () => {
+  it("unions projects with pending observations and projects with stale claimed observations", async () => {
+    const distinct = vi.fn(async (_field: string, filter: Record<string, unknown>) => {
+      if (filter.status === "pending") return ["proj-pending", "proj-both"];
+      return ["proj-stranded", "proj-both"];
+    });
+    const db = { collection: vi.fn(() => ({ distinct })) };
+
+    const projects = await findPendingProjects(db as any, 600000);
+
+    expect(projects.sort()).toEqual(["proj-both", "proj-pending", "proj-stranded"]);
+    expect(distinct).toHaveBeenCalledTimes(2);
+    expect(distinct).toHaveBeenNthCalledWith(1, "project", { status: "pending" });
+    const [, staleFilter] = distinct.mock.calls[1];
+    expect(staleFilter.status).toBe("claimed");
+    // The staleness threshold is now - reclaimAfterMs, i.e. roughly 10
+    // minutes in the past for the configured 600000ms.
+    const lt = (staleFilter.claimed_at as { $lt: Date }).$lt;
+    expect(lt).toBeInstanceOf(Date);
+    expect(Date.now() - lt.getTime()).toBeGreaterThan(590000);
+    expect(Date.now() - lt.getTime()).toBeLessThan(610000);
+  });
+});
+
+describe("runDoctor (--doctor)", () => {
+  function makeDoctorDb(opts: { canaryFound?: boolean } = {}) {
+    let insertedDoc: Record<string, unknown> | null = null;
+    const observationsCollection = {
+      insertOne: vi.fn(async (doc: Record<string, unknown>) => {
+        insertedDoc = doc;
+        return { insertedId: "canary-id" };
+      }),
+      findOne: vi.fn(async () =>
+        (opts.canaryFound ?? true) ? { _id: "canary-id", project: "doctor:canary" } : null
+      ),
+      deleteOne: vi.fn(async () => ({ deletedCount: 1 })),
+    };
+    const briefsCollection = {
+      findOne: vi.fn(async () => null), // no brief:global yet is still a PASS
+    };
+    const db = {
+      collection: vi.fn((name: string) =>
+        name === "observations" ? observationsCollection : briefsCollection
+      ),
+    };
+    return { db, observationsCollection, briefsCollection, getInserted: () => insertedDoc };
+  }
+
+  it("happy path: writes, reads back, and deletes a canary, times the brief fetch, and reports all steps passing", async () => {
+    loadConfig.mockReturnValue(makeConfig());
+    const { db, observationsCollection, briefsCollection, getInserted } = makeDoctorDb();
+
+    const report = await runDoctor(db as any, 3000);
+
+    expect(report.ok).toBe(true);
+    expect(report.steps).toHaveLength(4);
+    expect(report.steps.every((s: { ok: boolean }) => s.ok)).toBe(true);
+    expect(report.steps.every((s: { ms: number }) => typeof s.ms === "number")).toBe(true);
+
+    // Canary hygiene: project doctor:canary, normal priority (TTL cleans up
+    // leftovers), and the same document is deleted afterward.
+    const inserted = getInserted() as Record<string, unknown>;
+    expect(inserted.project).toBe("doctor:canary");
+    expect(inserted.priority).toBe("normal");
+    expect(observationsCollection.deleteOne).toHaveBeenCalledWith({ _id: "canary-id" });
+    expect(briefsCollection.findOne).toHaveBeenCalledWith({ _id: "brief:global" });
+  });
+
+  it("reports a failed step (and ok:false) when the canary cannot be read back, using the error name only", async () => {
+    loadConfig.mockReturnValue(makeConfig());
+    const { db } = makeDoctorDb({ canaryFound: false });
+
+    const report = await runDoctor(db as any, 3000);
+
+    expect(report.ok).toBe(false);
+    const readStep = report.steps.find((s: { name: string }) => s.name === "read canary back")!;
+    expect(readStep.ok).toBe(false);
+    expect(readStep.detail).toBe("Error"); // error NAME only, never a message
+  });
+
+  it("main dispatches --doctor, prints the report, and sets exit code 0 on success", async () => {
+    loadConfig.mockReturnValue(makeConfig());
+    const { db } = makeDoctorDb();
+    getDb.mockResolvedValue(db);
+
+    setArgs("--doctor");
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
+    const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("[doctor]");
+    expect(printed).toContain("all steps passed");
+    expect(printed).not.toContain("mongodb://"); // never a connection string
+    expect(runConsolidation).not.toHaveBeenCalled();
   });
 });

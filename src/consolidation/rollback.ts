@@ -141,11 +141,25 @@ export async function runRollback(
     revertedBeliefs.push(String(belief._id));
 
     if (belief.supersedes) {
-      await beliefsCollection.updateOne(
-        { _id: toFilterId(String(belief.supersedes)) as never },
-        { $set: { status: "active", updated_at: now } }
+      // Restore guards: (a) filter on status "archived" so a belief the user
+      // explicitly forgot (tombstoned) is never resurrected by a rollback,
+      // and a belief that is somehow already active is not double-restored;
+      // (b) $inc version so the every-mutation-bumps-version invariant that
+      // this file's own tombstone CAS depends on holds here too.
+      const restoreResult = await beliefsCollection.updateOne(
+        { _id: toFilterId(String(belief.supersedes)) as never, status: "archived" },
+        { $set: { status: "active", updated_at: now }, $inc: { version: 1 } }
       );
-      restoredBeliefs.push(String(belief.supersedes));
+      if (restoreResult.matchedCount > 0) {
+        restoredBeliefs.push(String(belief.supersedes));
+      } else {
+        needsManualReview.push({
+          beliefId: String(belief.supersedes),
+          observationIds: [],
+          runObservationIds: [],
+          reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+        });
+      }
     }
 
     // compileBrief's project-scope filter only matches scope:"project", so a
