@@ -28,7 +28,7 @@ jobs:
           cache: npm
           cache-dependency-path: docs/site/package-lock.json
       - name: Pin npm to match lockfile
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.6.2
       - name: Install dependencies
         working-directory: docs/site
         run: npm ci
