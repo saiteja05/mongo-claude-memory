@@ -192,7 +192,7 @@ function LiveDemoSection() {
 
       <div className="max-w-5xl mx-auto text-center mb-10 sm:mb-14">
         <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
-          How it works
+          How to use it
         </span>
         <h2
           className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
@@ -208,7 +208,7 @@ function LiveDemoSection() {
           Every hook, cron run, and tool call on the left maps to a real write or query on the right: no invented steps.
         </p>
         <a
-          href="https://github.com/saiteja05/mongo-claude-memory#architecture-overview"
+          href="https://github.com/saiteja05/mongo-claude-memory#using-it"
           target="_blank"
           rel="noopener noreferrer"
           className="mt-4 sm:mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-[#336443] hover:text-[#1f2a1d] transition-colors"
