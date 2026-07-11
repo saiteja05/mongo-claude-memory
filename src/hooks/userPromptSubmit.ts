@@ -12,7 +12,18 @@ export interface UserPromptSubmitInput {
   cwd: string;
   permission_mode: string;
   hook_event_name: string;
-  prompt_text: string;
+  /** The submitted prompt text, as Claude Code actually sends it. */
+  prompt: string;
+  /** Legacy field name; accepted as a fallback when `prompt` is absent. */
+  prompt_text?: string;
+}
+
+/**
+ * Resolves the prompt text from the hook payload. Claude Code sends the field
+ * as `prompt`; `prompt_text` is accepted as a legacy fallback.
+ */
+export function resolvePromptText(input: UserPromptSubmitInput): string {
+  return input.prompt ?? input.prompt_text ?? "";
 }
 
 export interface UserPromptSubmitDeps {
@@ -49,7 +60,8 @@ export async function captureUserPromptSubmit(
   deps: UserPromptSubmitDeps
 ): Promise<void> {
   try {
-    if (!shouldCaptureAsHashLine(input.prompt_text)) return;
+    const promptText = resolvePromptText(input);
+    if (!shouldCaptureAsHashLine(promptText)) return;
 
     const project = deps.getProjectKey(input.cwd);
     await deps.writeObservation({
@@ -57,7 +69,7 @@ export async function captureUserPromptSubmit(
       session_id: input.session_id,
       source: "hash_line",
       priority: "high",
-      text: input.prompt_text,
+      text: promptText,
     });
   } catch {
     // Fail open: a hook must never surface a memory-path error to the user.

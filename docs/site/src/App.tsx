@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { LogIn, UserPlus, Play, Sparkles, Menu, X } from 'lucide-react';
+import { LogIn, UserPlus, Play, Sparkles, Menu, X, Leaf } from 'lucide-react';
 import BoomerangVideoBg from './BoomerangVideoBg';
+import LiveDemoSection from './LiveDemoSection';
 
 const BG_VIDEO =
   'https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260511_131941_d136af49-e243-493a-be14-6ff3f24e09e6.mp4';
@@ -20,18 +21,22 @@ function App() {
   }, [menuOpen]);
 
   const navLinks = [
-    { href: '#architecture', label: 'Architecture' },
-    { href: '#how', label: 'How it works' },
-    { href: '#modes', label: 'Modes' },
+    { href: 'https://github.com/saiteja05/mongo-claude-memory#architecture-overview', label: 'Architecture' },
+    { href: 'https://github.com/saiteja05/mongo-claude-memory#using-it', label: 'How it works' },
+    { href: 'https://github.com/saiteja05/mongo-claude-memory#configuration-modes', label: 'Modes' },
   ];
 
   return (
+    <>
     <section className="relative w-full min-h-screen sm:h-screen overflow-hidden">
       <BoomerangVideoBg src={BG_VIDEO} className="absolute inset-0 w-full h-full" />
       <nav className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 sm:px-6 md:px-10 py-4 sm:py-6">
-        <div className="flex items-center gap-2 text-[#2d3a2a]">
-          <span className="text-lg sm:text-xl md:text-2xl font-semibold tracking-tight">
+        <div className="flex items-baseline gap-2 text-[#2d3a2a]">
+          <a href="/" className="text-lg sm:text-xl md:text-2xl font-semibold tracking-tight">
             Recall
+          </a>
+          <span className="hidden sm:inline text-[#4b5b47] font-medium text-xs sm:text-sm tracking-tight">
+            for Claude Code
           </span>
         </div>
 
@@ -40,6 +45,8 @@ function App() {
             <a
               key={link.href}
               href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
               className={`text-sm px-3 py-2 transition-colors ${
                 i === 0 ? 'font-semibold text-[#1f2a1d]' : 'font-medium text-[#4b5b47] hover:text-[#1f2a1d]'
               }`}
@@ -47,17 +54,32 @@ function App() {
               {link.label}
             </a>
           ))}
-          <button className="ml-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-medium px-5 py-2.5 rounded-full transition-colors">
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#readme"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-medium px-5 py-2.5 rounded-full transition-colors"
+          >
             Read the docs
-          </button>
+          </a>
         </div>
 
         <div className="flex items-center gap-3 sm:gap-6 text-[#2d3a2a]">
-          <a href="#contribute" className="hidden sm:flex items-center gap-2 text-sm font-medium hover:opacity-80 transition-opacity">
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden sm:flex items-center gap-2 text-sm font-medium hover:opacity-80 transition-opacity"
+          >
             <UserPlus className="w-4 h-4" />
             Contribute
           </a>
-          <a href="#docs" className="hidden sm:flex items-center gap-2 text-sm font-medium hover:opacity-80 transition-opacity">
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#readme"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden sm:flex items-center gap-2 text-sm font-medium hover:opacity-80 transition-opacity"
+          >
             <LogIn className="w-4 h-4" />
             Docs
           </a>
@@ -101,6 +123,8 @@ function App() {
               <a
                 key={link.href}
                 href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
                 onClick={() => setMenuOpen(false)}
                 className={`text-2xl font-semibold text-[#1f2a1d] py-4 border-b border-[#1f2a1d]/10 transition-all duration-500 ${
                   menuOpen ? 'translate-x-0 opacity-100' : 'translate-x-8 opacity-0'
@@ -118,22 +142,40 @@ function App() {
             }`}
             style={{ transitionDelay: menuOpen ? '400ms' : '0ms' }}
           >
-            <a href="#contribute" className="flex items-center gap-2 text-sm font-medium text-[#2d3a2a] sm:hidden">
+            <a
+              href="https://github.com/saiteja05/mongo-claude-memory"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-sm font-medium text-[#2d3a2a] sm:hidden"
+            >
               <UserPlus className="w-4 h-4" />
               Contribute
             </a>
-            <a href="#docs" className="flex items-center gap-2 text-sm font-medium text-[#2d3a2a] sm:hidden">
+            <a
+              href="https://github.com/saiteja05/mongo-claude-memory#readme"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-sm font-medium text-[#2d3a2a] sm:hidden"
+            >
               <LogIn className="w-4 h-4" />
               Docs
             </a>
-            <button className="mt-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-semibold px-5 py-3 rounded-full transition-colors">
+            <a
+              href="https://github.com/saiteja05/mongo-claude-memory#readme"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-semibold px-5 py-3 rounded-full transition-colors"
+            >
               Read the docs
-            </button>
+            </a>
           </div>
         </div>
       </div>
 
       <div className="relative z-10 flex flex-col items-center text-center pt-24 sm:pt-28 md:pt-32 px-4 sm:px-6">
+        <span className="mb-3 sm:mb-4 text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
+          Persistent memory for Claude Code
+        </span>
         <h1
           className="font-normal leading-[0.95] text-[#336443] text-[2rem] sm:text-4xl md:text-5xl lg:text-[4.75rem] xl:text-[5.25rem] max-w-5xl"
           style={{ fontFamily: '"Neue Haas Grotesk Display Pro 55 Roman", "Neue Haas Grotesk Text Pro", "Helvetica Neue", Helvetica, Arial, sans-serif', letterSpacing: '-0.035em' }}
@@ -144,6 +186,17 @@ function App() {
             <br className="hidden sm:block" /> every compaction
           </span>
         </h1>
+        <a
+          href="https://www.mongodb.com/resources/basics/artificial-intelligence/agent-memory"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-4 sm:mt-5 inline-flex items-center gap-2 bg-white/80 backdrop-blur-md rounded-full border border-[#00684A]/25 px-4 py-1.5 shadow-sm hover:bg-white/95 transition-colors"
+        >
+          <Leaf className="w-4 h-4 text-[#00684A]" />
+          <span className="text-sm font-semibold text-[#00684A]">
+            Powered by MongoDB Atlas
+          </span>
+        </a>
         <p className="mt-6 sm:mt-8 text-[#4b5b47] text-sm sm:text-base md:text-lg leading-relaxed max-w-md px-2">
           Captures everything Claude Code sees, distills it offline, and hands back a small brief every session.
         </p>
@@ -160,22 +213,39 @@ function App() {
           Capture, consolidation, and hybrid search run as one MongoDB Atlas pipeline: no separate vector store or search service to wire up.
         </p>
         <div className="flex items-center gap-4 flex-wrap">
-          <button className="bg-[#3d5638] sm:bg-white hover:bg-[#2d4228] sm:hover:bg-white/90 text-white sm:text-[#1f2a1d] text-sm font-semibold px-5 sm:px-6 py-2.5 sm:py-3 rounded-full transition-colors shadow-sm">
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#readme"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="bg-[#3d5638] sm:bg-white hover:bg-[#2d4228] sm:hover:bg-white/90 text-white sm:text-[#1f2a1d] text-sm font-semibold px-5 sm:px-6 py-2.5 sm:py-3 rounded-full transition-colors shadow-sm"
+          >
             Read the docs
-          </button>
-          <button className="text-[#3d5638] sm:text-white text-sm font-semibold sm:font-medium hover:opacity-80 transition-opacity">
+          </a>
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#architecture-overview"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#3d5638] sm:text-white text-sm font-semibold sm:font-medium hover:opacity-80 transition-opacity"
+          >
             View architecture
-          </button>
+          </a>
         </div>
       </div>
 
-      <div className="hidden sm:flex absolute right-6 md:right-10 bottom-8 md:bottom-10 z-10 items-center gap-2 text-white/90 text-sm">
-        <button className="flex items-center justify-center w-6 h-6 rounded-full bg-white/20 backdrop-blur-sm hover:bg-white/30 transition-colors">
+      <a
+        href="https://github.com/saiteja05/mongo-claude-memory#using-it"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hidden sm:flex absolute right-6 md:right-10 bottom-8 md:bottom-10 z-10 items-center gap-2 text-white/90 text-sm"
+      >
+        <span className="flex items-center justify-center w-6 h-6 rounded-full bg-white/20 backdrop-blur-sm hover:bg-white/30 transition-colors">
           <Play className="w-3 h-3 fill-white text-white ml-0.5" />
-        </button>
+        </span>
         <span className="font-medium">How it works</span>
-      </div>
+      </a>
     </section>
+    <LiveDemoSection />
+    </>
   );
 }
 

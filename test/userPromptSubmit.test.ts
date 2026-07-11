@@ -38,7 +38,7 @@ const baseInput: UserPromptSubmitInput = {
   cwd: "/some/repo",
   permission_mode: "default",
   hook_event_name: "UserPromptSubmit",
-  prompt_text: "",
+  prompt: "",
 };
 
 describe("captureUserPromptSubmit", () => {
@@ -46,7 +46,7 @@ describe("captureUserPromptSubmit", () => {
     const writeObservation = vi.fn().mockResolvedValue("id-1");
 
     await captureUserPromptSubmit(
-      { ...baseInput, prompt_text: "#remember this fact" },
+      { ...baseInput, prompt: "#remember this fact" },
       { getProjectKey: () => "myrepo-abc123", writeObservation }
     );
 
@@ -64,11 +64,49 @@ describe("captureUserPromptSubmit", () => {
     const writeObservation = vi.fn().mockResolvedValue("id-1");
 
     await captureUserPromptSubmit(
-      { ...baseInput, prompt_text: "please fix this bug" },
+      { ...baseInput, prompt: "please fix this bug" },
       { getProjectKey: () => "myrepo-abc123", writeObservation }
     );
 
     expect(writeObservation).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the legacy prompt_text field when prompt is absent", async () => {
+    const writeObservation = vi.fn().mockResolvedValue("id-1");
+
+    const legacyInput = {
+      ...baseInput,
+      prompt_text: "#legacy hash line capture",
+    } as UserPromptSubmitInput;
+    delete (legacyInput as Partial<UserPromptSubmitInput>).prompt;
+
+    await captureUserPromptSubmit(legacyInput, {
+      getProjectKey: () => "myrepo-abc123",
+      writeObservation,
+    });
+
+    expect(writeObservation).toHaveBeenCalledTimes(1);
+    expect(writeObservation).toHaveBeenCalledWith({
+      project: "myrepo-abc123",
+      session_id: "sess-1",
+      source: "hash_line",
+      priority: "high",
+      text: "#legacy hash line capture",
+    });
+  });
+
+  it("prefers prompt over prompt_text when both are present", async () => {
+    const writeObservation = vi.fn().mockResolvedValue("id-1");
+
+    await captureUserPromptSubmit(
+      { ...baseInput, prompt: "#current field wins", prompt_text: "#stale legacy value" },
+      { getProjectKey: () => "myrepo-abc123", writeObservation }
+    );
+
+    expect(writeObservation).toHaveBeenCalledTimes(1);
+    expect(writeObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "#current field wins" })
+    );
   });
 
   it("fails open (never throws) when writeObservation rejects", async () => {
@@ -76,7 +114,7 @@ describe("captureUserPromptSubmit", () => {
 
     await expect(
       captureUserPromptSubmit(
-        { ...baseInput, prompt_text: "#remember this fact" },
+        { ...baseInput, prompt: "#remember this fact" },
         { getProjectKey: () => "myrepo-abc123", writeObservation }
       )
     ).resolves.toBeUndefined();

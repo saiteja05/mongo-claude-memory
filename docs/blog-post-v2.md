@@ -6,23 +6,25 @@ Or the Monday version: you open a fresh session and spend the first ten minutes 
 
 If you use Claude Code every day, you have already built a coping mechanism for this. It is called CLAUDE.md, and it is why yours is 400 lines long.
 
-This post is about replacing that coping mechanism with an actual memory engine, built on MongoDB Atlas. The headline capability, the one nothing in the flat-file world gives you: **compaction wipes conversation history, not memory.** The brief that carries your standing facts is re-injected after every compaction, so the decision from minute five survives minute forty. The rest of the post is how, and what it costs.
+This post is about replacing that coping mechanism with an actual memory engine, built on MongoDB Atlas. The headline capability: **decisions get remembered even when nobody wrote them down.** Native memory only keeps what the model paused to save; this engine mines the session transcript itself, so the retry-queue decision from minute five gets captured, consolidated, and re-injected after every compaction and into every future session, whether or not anyone thought to memorize it. The rest of the post is how, and what it costs.
 
 ## The coping mechanism is the problem
 
-CLAUDE.md and the auto-memory folder are Claude Code's built-in answer, and for a while they work. You write down the house rules. Claude writes down its own notes. Every session starts by loading all of it.
+CLAUDE.md and the auto-memory folder are Claude Code's built-in answer, and credit where due: they are better than most people think. Your hand-written CLAUDE.md loads deterministically every session and even survives compaction. Auto memory keeps an index file whose first 200 lines load at startup, with topic files read on demand. The design is sensible.
 
-Then the failure modes arrive, and every one of them shows up on your token bill or in your context window.
+The failure modes are subtler than "it costs too much," and every one of them traces to the same root: both ends of the pipeline run on the model's discretion.
 
-**You pay for all of it, every session, whether the task needs it or not.** The memory folder is loaded front to back at session start. The note about a bug you fixed in March is billed alongside the convention you actually need today, and both of them displace code the model could otherwise be reading. Memory that grows forever, loaded into a window that does not, is a subscription whose price only goes up.
+**Capture is discretionary, so most of what happens is never memorized.** Auto memory only learns something if the model, mid-session, decides to write it down. The decision you made together at minute five gets captured only if Claude happened to judge it memorable at the time, while it was busy doing the actual work. Most decisions are not captured. They live in the transcript, and nothing ever reads the transcript again.
 
-**Recall is discretionary, so it is unreliable.** Auto-memory surfaces what the model decides is relevant. Some sessions it recalls the right thing, some sessions it does not, and you cannot tell which kind of session you are in until it suggests the webhook again. A memory you cannot count on is a memory you re-state defensively, which means you pay for the fact twice: once in the file, once in your prompt.
+**Recall is discretionary, so it is unreliable.** Topic files load only when the model decides to go looking. Some sessions it recalls the right thing, some sessions it does not, and you cannot tell which kind of session you are in until it suggests the webhook again. A memory you cannot count on is a memory you re-state defensively, which means you pay for the fact twice: once in the file, once in your prompt.
 
-**There is no search, only "load everything."** When the fact you need did not make it into what got loaded, there is no second chance. You cannot ask the memory a question. The retrieval strategy is hope.
+**The index has a hard ceiling, and there is no search behind it.** Only the first 200 lines of the memory index load at startup. Fact number 201 is unreachable no matter how important it is, and there is no query interface to the rest: not to the overflow, not to old topic files, not to the transcripts where the undocumented decisions actually live. Past the ceiling, the retrieval strategy is hope.
+
+**Nothing merges or retires anything.** Say "we use npm" in March and "we switched to pnpm" in May and both sit in the files, equally confident. Stale facts do not expire; contradictions do not resolve; duplicates accumulate. The curation job is yours, by hand, forever.
 
 **It lives on one laptop.** Switch machines, spin up a second worktree, onboard a teammate, and the accumulated memory stays behind. Everything your Claude learned about the project is trapped in a folder on one disk.
 
-None of that is a bug in Claude Code. Flat files were never built to be searched, ranked, budgeted, or shared. They were built to be read in full, which is exactly the one thing a finite context window cannot afford forever.
+None of that is a bug in Claude Code. Flat files maintained by a busy model were never going to be a database. Capture, ranking, deduplication, search, and sync are database jobs, which is the entire thesis of what follows.
 
 ## "Or I could just prune my CLAUDE.md"
 
@@ -88,15 +90,15 @@ Three sessions of scattered phrasing became two standalone facts, each with prov
 
 If Atlas is unreachable, every hook fails open and exits clean. Your session behaves like stock Claude Code minus one brief. Requirement six, and the reason you can adopt this without adding a new way for your tooling to break.
 
-## The cost math, concretely
+## The math, concretely
 
-Here is the part that made us build it rather than keep coping.
+Here is the honest comparison, because the interesting number is not raw token cost. Native memory's startup load is capped too (about 200 index lines). At session start, both systems spend a similar, small, fixed token budget. The difference is what that budget buys, and what is reachable beyond it.
 
-With file-based memory, session-start cost is proportional to everything you have ever recorded. It only grows, and it is billed on every session, relevant or not.
+Native memory's fixed budget buys an index the model wrote for itself, one note at a time, mid-task: whatever it happened to capture, in whatever order it happened to write it, contradictions included. Beyond the budget sits a hard wall: no search, no query, no path to fact 201 or to any decision that never got written down.
 
-With this engine, session-start cost is a constant you chose: at the default caps, roughly 2,000 tokens, whether the history behind it is a week or a year. Search cost is proportional to the question, a handful of beliefs per query, not the archive. And the LLM work of distilling memory runs offline on a cheaper model, so your interactive sessions carry none of it.
+This engine's fixed budget (800 tokens global plus 1,200 per project, both configurable) buys a compiled brief: every fact captured from every session, distilled by an offline LLM pass, deduplicated, contradiction-resolved, and ranked, so the cap is filled with the facts that earned it. Beyond the budget sits everything else, one `memory_search` call away, at a cost proportional to the question rather than the archive. And the LLM work of distilling runs offline on a smaller, cheaper model, so none of it lands on your interactive session.
 
-Memory that scales with how long you use it. Session cost that does not.
+Same size wallet. One of them holds curated currency, and there is a bank behind it.
 
 ## Why MongoDB Atlas, and not a stack of five services
 
