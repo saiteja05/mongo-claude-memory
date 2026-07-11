@@ -192,11 +192,11 @@ function App() {
         >
           <Leaf className="w-4 h-4 text-[#00684A]" />
           <span className="text-sm font-semibold text-[#00684A]">
-            Powered by MongoDB Atlas
+            Powered by MongoDB Atlas 
           </span>
         </a>
         <p className="mt-6 sm:mt-8 text-[#4b5b47] text-sm sm:text-base md:text-lg leading-relaxed max-w-md px-2">
-          Captures everything Claude Code sees, distills it offline, and hands back a small brief every session.
+          Captures everything Claude Code sees, distills it offline, and hands back as a small brief every session.
         </p>
       </div>
 
@@ -208,7 +208,7 @@ function App() {
           </span>
         </div>
         <p className="text-[#3d5638]/90 sm:text-white/85 text-xs leading-relaxed mb-6 max-w-xs font-medium sm:font-normal">
-          Capture, consolidation, and hybrid search run as one MongoDB Atlas pipeline: no separate vector store or search service to wire up.
+          Memory Capture, consolidation, and hybrid search run as one MongoDB Aggregation pipeline: no standalone vector store or search service to wire up.
         </p>
         <div className="flex items-center gap-4 flex-wrap">
           <a
