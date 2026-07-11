@@ -8,6 +8,42 @@ For the full design rationale, verified Atlas capability matrix, and phased impl
 
 ---
 
+## Contents
+
+- [Architecture overview](#architecture-overview)
+- [What stays unchanged](#what-stays-unchanged)
+- [Data model](#data-model)
+  - [`observations`](#observations)
+  - [`beliefs`](#beliefs)
+  - [`briefs`](#briefs)
+  - [`locks`](#locks)
+- [Getting started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Install and build](#install-and-build)
+  - [Environment variables](#environment-variables)
+  - [Index setup](#index-setup)
+  - [Hook registration](#hook-registration)
+  - [MCP registration](#mcp-registration)
+  - [Consolidator scheduling](#consolidator-scheduling)
+- [Using it](#using-it)
+  - [1. What happens automatically](#1-what-happens-automatically)
+  - [2. Explicitly remembering something](#2-explicitly-remembering-something)
+  - [3. Recalling something](#3-recalling-something)
+  - [4. Forgetting something](#4-forgetting-something)
+  - [5. Keeping memory tidy](#5-keeping-memory-tidy)
+- [Configuration modes](#configuration-modes)
+  - [Embedding modes (`EMBEDDING_MODE`)](#embedding-modes-embedding_mode)
+  - [Rerank modes (`RERANK_MODE`)](#rerank-modes-rerank_mode)
+  - [LLM provider (`LLM_PROVIDER`)](#llm-provider-llm_provider)
+  - [`VOYAGE_BASE_URL`: native Voyage vs. Atlas model API key](#voyage_base_url-native-voyage-vs-atlas-model-api-key)
+  - [Credential matrix by combination](#credential-matrix-by-combination)
+- [Search pipeline](#search-pipeline)
+- [Operations](#operations)
+  - [Safety properties](#safety-properties)
+- [Development](#development)
+
+---
+
 ## Architecture overview
 
 ```
@@ -122,7 +158,7 @@ Consolidated, durable, polymorphic facts. The only collection with a single logi
 | `supersedes` | string (optional) | `_id` of the belief this replaced |
 | `observation_ids` | `string[]` | Provenance |
 
-Indexes: Atlas Vector Search on `embedding` (`beliefs_vec`, scalar-quantized, filterable on `project`/`scope`/`status`), a parallel `autoEmbed`-backed vector index (`beliefs_vec_auto`), Atlas Search (BM25) on `text`/`type` (`beliefs_text`), and a compound b-tree index `{project, scope, status}` for the brief compiler. A partial TTL index expires `archived`/`tombstoned` beliefs after 90 days.
+Indexes: Atlas Vector Search on `embedding` (`beliefs_vec`, scalar-quantized, filterable on `project`/`scope`/`status`) or, when `EMBEDDING_MODE=auto`, an `autoEmbed`-backed vector index (`beliefs_vec_auto`) instead, only one of the two is created based on the configured `EMBEDDING_MODE`, plus Atlas Search (BM25) on `text`/`type` (`beliefs_text`), and a compound b-tree index `{project, scope, status}` for the brief compiler. A partial TTL index expires `archived`/`tombstoned` beliefs after 90 days.
 
 ### `briefs`
 The materialized injection payload, one document per scope key.
@@ -204,7 +240,7 @@ Run once against a fresh Atlas database, and safely re-run at any time (every st
 npm run setup:indexes
 ```
 
-This creates the four collections if missing, the observation TTL index, the beliefs compound index and archival TTL index, both vector search indexes (`beliefs_vec` for app-side embeddings, `beliefs_vec_auto` for Atlas `autoEmbed`), and the `beliefs_text` BM25 search index. Search-index creation failures (for example, a Preview feature not enabled on a given cluster) are logged and skipped without blocking the rest of setup.
+This creates the four collections if missing, the observation TTL index, the beliefs compound index and archival TTL index, the vector search index matching the current `EMBEDDING_MODE` (`beliefs_vec` for app-side embeddings, `beliefs_vec_auto` for Atlas `autoEmbed`, only one is created, not both), and the `beliefs_text` BM25 search index. Search-index creation failures (for example, a Preview feature not enabled on a given cluster) are logged and skipped without blocking the rest of setup.
 
 ### Hook registration
 
@@ -377,7 +413,7 @@ node dist/consolidation/cli.js --rollback --run-id <id>
 | `appside` (default) | The application computes 1024-dim `voyage-4` vectors and stores them on the belief document; queries are embedded app-side with `input_type=query`. | `VOYAGE_API_KEY` (or an Atlas model API key via `VOYAGE_BASE_URL`) |
 | `auto` | Atlas `autoEmbed` (Preview) computes and stores the embedding server-side from the belief's `text` field on write, via the `beliefs_vec_auto` index; queries are also embedded server-side, via `query: { text: "..." }` passed to `$vectorSearch` against the same index; the app computes no vectors at all in this mode. | Atlas org must have `autoEmbed` enabled; Preview write cap is 2,000 RPM |
 
-Both modes are live and both indexes are always created by `setup:indexes`, so a deployment can switch `EMBEDDING_MODE` without a separate index-setup step. `autoEmbed` is a Preview feature with per-model query rate limits (3 requests/minute per model), which is why `appside` is the default for high-frequency, hot-path search: `auto` is a better fit for lower-volume or non-latency-sensitive deployments.
+Both modes are live, but `setup:indexes` only creates the index for the currently configured mode (to avoid paying for embedding computation in both places at once): switching `EMBEDDING_MODE` requires re-running `npm run setup:indexes` to create the newly-needed index, a one-time idempotent step, not a migration. `autoEmbed` is a Preview feature with per-model query rate limits (3 requests/minute per model), which is why `appside` is the default for high-frequency, hot-path search: `auto` is a better fit for lower-volume or non-latency-sensitive deployments.
 
 ### Rerank modes (`RERANK_MODE`)
 
@@ -452,4 +488,4 @@ npm run consolidate    # run the consolidator CLI
 npm run mcp            # start the MCP server (stdio)
 ```
 
-The test suite (264 tests across the hooks, capture, consolidation, embeddings, MCP tools, and CLI modules) is fully mocked: no live Atlas cluster, Voyage key, or Anthropic/AWS credentials are needed to develop or run it. Live Atlas/Voyage behavior (hybrid search, `autoEmbed`, native `$rerank`, degradation paths) should be verified against a real cluster before relying on it in production, since Atlas capabilities move faster than any fixed test fixture.
+The test suite (265 tests across the hooks, capture, consolidation, embeddings, MCP tools, and CLI modules) is fully mocked: no live Atlas cluster, Voyage key, or Anthropic/AWS credentials are needed to develop or run it. Live Atlas/Voyage behavior (hybrid search, `autoEmbed`, native `$rerank`, degradation paths) should be verified against a real cluster before relying on it in production, since Atlas capabilities move faster than any fixed test fixture.

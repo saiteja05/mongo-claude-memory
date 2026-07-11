@@ -93,39 +93,49 @@ export async function setupIndexes() {
     await ensureTtlIndex(db);
     await ensureBeliefsCompoundIndex(db);
     await ensureBeliefsTtlIndex(db);
-    await ensureSearchIndex(db, BELIEFS, "beliefs_vec", "vectorSearch", {
-        fields: [
-            {
-                type: "vector",
-                path: "embedding",
-                numDimensions: 1024,
-                similarity: "cosine",
-                quantization: "scalar",
-            },
-            { type: "filter", path: "project" },
-            { type: "filter", path: "scope" },
-            { type: "filter", path: "status" },
-        ],
-    });
-    // Coexists with beliefs_vec (appside): this index backs the fully-managed
-    // Atlas autoEmbed mode (config.embeddingMode === "auto"), where Atlas
-    // computes and stores the embedding server-side from the "text" path
-    // instead of the app calling Voyage directly. Both modes' indexes are
-    // always created so a deployment can switch EMBEDDING_MODE without a
-    // separate index-setup step.
-    await ensureSearchIndex(db, BELIEFS, "beliefs_vec_auto", "vectorSearch", {
-        fields: [
-            {
-                type: "autoEmbed",
-                path: "text",
-                model: config.voyageModel,
-                modality: "text",
-            },
-            { type: "filter", path: "project" },
-            { type: "filter", path: "scope" },
-            { type: "filter", path: "status" },
-        ],
-    });
+    if (config.embeddingMode === "appside") {
+        await ensureSearchIndex(db, BELIEFS, "beliefs_vec", "vectorSearch", {
+            fields: [
+                {
+                    type: "vector",
+                    path: "embedding",
+                    numDimensions: 1024,
+                    similarity: "cosine",
+                    quantization: "scalar",
+                },
+                { type: "filter", path: "project" },
+                { type: "filter", path: "scope" },
+                { type: "filter", path: "status" },
+            ],
+        });
+    }
+    // Only the currently configured mode's index is created here, not both:
+    // autoEmbed bills Atlas for computing an embedding for every belief's text
+    // server side, so creating beliefs_vec_auto while running in appside mode
+    // would mean paying for embedding computation nobody ever queries.
+    // Conversely, keeping beliefs_vec around while running in auto mode is
+    // wasted write/maintenance overhead for an index nothing reads. If
+    // EMBEDDING_MODE is switched later, re-run setupIndexes() to create the
+    // newly-needed index (idempotent, see ensureSearchIndex's already-exists
+    // check via listSearchIndexes). Note: switching modes does NOT
+    // automatically drop the old mode's now-unused index, it stays in place
+    // until manually dropped, which is out of scope here (no drop code is
+    // being added).
+    if (config.embeddingMode === "auto") {
+        await ensureSearchIndex(db, BELIEFS, "beliefs_vec_auto", "vectorSearch", {
+            fields: [
+                {
+                    type: "autoEmbed",
+                    path: "text",
+                    model: config.voyageModel,
+                    modality: "text",
+                },
+                { type: "filter", path: "project" },
+                { type: "filter", path: "scope" },
+                { type: "filter", path: "status" },
+            ],
+        });
+    }
     await ensureSearchIndex(db, BELIEFS, "beliefs_text", "search", {
         mappings: {
             dynamic: false,

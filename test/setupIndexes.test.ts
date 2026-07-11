@@ -3,6 +3,7 @@ import { BELIEFS as BELIEFS_NAME } from "../src/db/schema.js";
 
 let savedUri: string | undefined;
 let savedMdbUri: string | undefined;
+let savedEmbeddingMode: string | undefined;
 
 interface FakeState {
   existingCollections: Set<string>;
@@ -66,8 +67,10 @@ beforeEach(() => {
   // connection string rather than relying on the ambient shell env.
   savedUri = process.env.MEMORY_MONGODB_URI;
   savedMdbUri = process.env.MDB_MCP_CONNECTION_STRING;
+  savedEmbeddingMode = process.env.EMBEDDING_MODE;
   process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
   delete process.env.MDB_MCP_CONNECTION_STRING;
+  delete process.env.EMBEDDING_MODE;
 });
 
 afterEach(() => {
@@ -75,6 +78,8 @@ afterEach(() => {
   else process.env.MEMORY_MONGODB_URI = savedUri;
   if (savedMdbUri === undefined) delete process.env.MDB_MCP_CONNECTION_STRING;
   else process.env.MDB_MCP_CONNECTION_STRING = savedMdbUri;
+  if (savedEmbeddingMode === undefined) delete process.env.EMBEDDING_MODE;
+  else process.env.EMBEDDING_MODE = savedEmbeddingMode;
 });
 
 describe("setupIndexes", () => {
@@ -101,7 +106,29 @@ describe("setupIndexes", () => {
     expect(calls).toContain("createIndex:observations:expiresAt_ttl");
     expect(calls).toContain("createIndex:beliefs:project_scope_status");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_vec");
+    expect(calls).not.toContain("createSearchIndex:beliefs:beliefs_vec_auto");
+    expect(calls).toContain("createSearchIndex:beliefs:beliefs_text");
+  });
+
+  it("creates beliefs_vec_auto instead of beliefs_vec when embeddingMode is auto", async () => {
+    const calls: string[] = [];
+    const state: FakeState = {
+      existingCollections: new Set(),
+      existingIndexNames: new Set(),
+      existingSearchIndexNames: new Set(),
+      searchIndexesUnsupported: false,
+    };
+    vi.doMock("../src/db/client.js", () => ({
+      getDb: async () => makeFakeDb(state, calls),
+      closeDb: async () => {},
+    }));
+
+    process.env.EMBEDDING_MODE = "auto";
+    const { setupIndexes } = await import("../src/db/setupIndexes.js");
+    await setupIndexes();
+
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_vec_auto");
+    expect(calls).not.toContain("createSearchIndex:beliefs:beliefs_vec");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_text");
   });
 
@@ -252,6 +279,7 @@ describe("setupIndexes", () => {
       closeDb: async () => {},
     }));
 
+    process.env.EMBEDDING_MODE = "auto";
     const { setupIndexes } = await import("../src/db/setupIndexes.js");
     await setupIndexes();
 
