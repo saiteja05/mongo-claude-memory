@@ -22,8 +22,7 @@ function App() {
 
   const navLinks = [
     { href: 'https://github.com/saiteja05/mongo-claude-memory#architecture-overview', label: 'Architecture' },
-    { href: '#how-it-works', label: 'How it works' },
-    { href: 'https://github.com/saiteja05/mongo-claude-memory#configuration-modes', label: 'Modes' },
+    { href: '#how-it-works', label: 'How to use it' },
   ];
 
   return (
@@ -54,12 +53,12 @@ function App() {
             </a>
           ))}
           <a
-            href="https://github.com/saiteja05/mongo-claude-memory#readme"
+            href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
             target="_blank"
             rel="noopener noreferrer"
             className="ml-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-medium px-5 py-2.5 rounded-full transition-colors"
           >
-            Read the docs
+            Install
           </a>
         </div>
 
@@ -159,12 +158,12 @@ function App() {
               Docs
             </a>
             <a
-              href="https://github.com/saiteja05/mongo-claude-memory#readme"
+              href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
               target="_blank"
               rel="noopener noreferrer"
               className="mt-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-semibold px-5 py-3 rounded-full transition-colors"
             >
-              Read the docs
+              Install
             </a>
           </div>
         </div>
@@ -237,7 +236,7 @@ function App() {
         <span className="flex items-center justify-center w-6 h-6 rounded-full bg-white/20 backdrop-blur-sm hover:bg-white/30 transition-colors">
           <Play className="w-3 h-3 fill-white text-white ml-0.5" />
         </span>
-        <span className="font-medium">How it works</span>
+        <span className="font-medium">How to use it</span>
       </a>
     </section>
     <LiveDemoSection />
