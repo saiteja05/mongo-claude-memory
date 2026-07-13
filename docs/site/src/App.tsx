@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { LogIn, UserPlus, Play, Sparkles, Menu, X, Leaf } from 'lucide-react';
 import BoomerangVideoBg from './BoomerangVideoBg';
+import HowItWorksVisual from './HowItWorksVisual';
 import LiveDemoSection from './LiveDemoSection';
 
 const BG_VIDEO =
@@ -22,6 +23,7 @@ function App() {
 
   const navLinks = [
     { href: 'https://github.com/saiteja05/mongo-claude-memory#architecture-overview', label: 'Architecture' },
+    { href: '#pipeline', label: 'How it works' },
     { href: '#how-it-works', label: 'How to use it' },
   ];
 
@@ -239,6 +241,7 @@ function App() {
         <span className="font-medium">How to use it</span>
       </a>
     </section>
+    <HowItWorksVisual />
     <LiveDemoSection />
     </>
   );
