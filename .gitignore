@@ -6,3 +6,10 @@ dist
 demo/gauntlet/state/
 docs/blog-post.md
 docs/blog-post-v2.md
+
+# Gauntlet benchmark artifacts and fixture stay local (see demo/gauntlet/README.md)
+demo/gauntlet/REPORT.md
+demo/gauntlet/RED-TEAM.md
+demo/gauntlet/operator-notes.md
+demo/gauntlet/adjudications*.json*
+demo/gauntlet/facts.json
