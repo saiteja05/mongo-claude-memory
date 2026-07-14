@@ -27,6 +27,8 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: docs/site/package-lock.json
+      - name: Pin npm to match the version that generates the lockfile locally
+        run: npm install -g npm@11.6.2
       - name: Install dependencies
         working-directory: docs/site
         run: npm ci
