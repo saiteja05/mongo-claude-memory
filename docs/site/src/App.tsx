@@ -3,6 +3,7 @@ import { LogIn, UserPlus, Play, Sparkles, Menu, X, Leaf } from 'lucide-react';
 import BoomerangVideoBg from './BoomerangVideoBg';
 import ArchitectureSection from './ArchitectureSection';
 import HowItWorksVisual from './HowItWorksVisual';
+import BenchmarkSection from './BenchmarkSection';
 import LiveDemoSection from './LiveDemoSection';
 
 const BG_VIDEO =
@@ -25,6 +26,7 @@ function App() {
   const navLinks = [
     { href: '#architecture', label: 'Architecture' },
     { href: '#pipeline', label: 'How it works' },
+    { href: '#benchmark', label: 'Benchmark' },
     { href: '#how-it-works', label: 'How to use it' },
   ];
 
@@ -244,6 +246,7 @@ function App() {
     </section>
     <ArchitectureSection />
     <HowItWorksVisual />
+    <BenchmarkSection />
     <LiveDemoSection />
     </>
   );

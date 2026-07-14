@@ -4,6 +4,7 @@ dist
 *.log
 .DS_Store
 demo/gauntlet/state/
+demo/gauntlet/v2/state/
 docs/blog-post.md
 docs/blog-post-v2.md
 

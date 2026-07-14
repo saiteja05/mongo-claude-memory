@@ -44,6 +44,14 @@ For the full design rationale, verified Atlas capability matrix, and phased impl
   - [Offline brief cache](#offline-brief-cache)
 - [Development](#development)
 - [Benchmarking (the memory gauntlet)](#benchmarking-the-memory-gauntlet)
+  - [Why a benchmark](#why-a-benchmark)
+  - [The four arms](#the-four-arms)
+  - [How a run works](#how-a-run-works)
+  - [Grading and adjudication](#grading-and-adjudication)
+  - [What this design controls for](#what-this-design-controls-for)
+  - [Long-horizon coverage](#long-horizon-coverage)
+  - [Latest results](#latest-results)
+  - [Running it yourself](#running-it-yourself)
 
 ---
 
@@ -573,6 +581,74 @@ The test suite (541 tests across the hooks, capture, consolidation, embeddings, 
 
 ## Benchmarking (the memory gauntlet)
 
-`demo/gauntlet/` holds a reproducible recall benchmark comparing this engine against Claude Code's native memory and against a memoryless baseline, across four isolated arms: `control` (never seeded, a guessability baseline), `stock` (native memory alone), `engine` (this engine alone, with native memory quarantined), and `engine-native` (both together, the realistic configuration most users run). The pipeline seeds a fixed fact corpus into headless sessions, consolidates it, asks recall questions in fresh sessions, and grades the answers by word-boundary keyword matching, cross-checked by a blinded LLM judge (`judge.mjs`) whose disagreements are reviewed by a human before being merged into the final grade.
+`demo/gauntlet/` holds a reproducible recall benchmark comparing this engine against Claude Code's native memory and against a memoryless baseline. This section explains what the benchmark measures and how it guards against the ways a self-run recall benchmark can quietly mislead itself. For the exact commands, the environment variable table, and the full integrity guarantees, see `demo/gauntlet/README.md`.
 
-Benchmark facts and results (`facts.json`, `REPORT.md`, adjudications, run state) are gitignored and local-only: a fresh clone needs `facts.json` supplied by the maintainer before any gauntlet script can run. See `demo/gauntlet/README.md` for the full run order, arm semantics, and integrity guarantees.
+### Why a benchmark
+
+A persistent memory engine's value rests entirely on the recall it produces, and that claim is not credible on its own say-so. Two questions need answering with evidence: does this engine recall more correctly than Claude Code's native auto-memory, and does either beat what a memoryless model already gets right from guessing or from world knowledge alone. A benchmark that grades its own output with a single keyword pass, run once by whoever built the product, does not answer either question convincingly: it is exposed to a contaminated memory store leaking answers across arms, a substring match inflating the score, a lone unblinded grader's bias, and run artifacts silently mixing across attempts. Every design choice below (isolated arms, word-boundary grading, a blinded independent judge, a hash-bound manual override log, and a run id threaded through every artifact) exists to close one of those specific gaps rather than to ask for trust.
+
+### The four arms
+
+| Arm | Native auto-memory | MongoDB engine | Seeded | Purpose |
+|---|---|---|---|---|
+| `control` | none (no hooks, no `CLAUDE.md`, no auto-memory) | none | never | Guessability baseline: what a memoryless model gets right on its own. Native memory for this arm is wiped before every recall trial so an earlier trial's guess cannot leak into the next. |
+| `stock` | active | none | yes | Claude Code's native memory alone. |
+| `engine` | quarantined | active, own database | yes | The MongoDB engine alone. Native auto-memory is deleted after every seed session and swept again at the end of seeding; `recall.mjs` refuses to run (a hard gate, not a cleanup) if any native memory directory still exists for this arm. |
+| `engine-native` | active | active, own database | yes | The engine plus native memory both running, the realistic configuration most engine users run day to day. Capture is measured per store here: native, engine, and combined (either store). |
+
+`control` is never seeded: seeding it would defeat the point of measuring guessability. Each engine arm (`engine`, `engine-native`) writes to its own dedicated database, so the two never read or write each other's beliefs or briefs even though they run the same product.
+
+### How a run works
+
+Each run moves through the same stages, in order:
+
+1. **Reset.** Drop all gauntlet databases and local run state, so the run starts from a known-clean baseline instead of accumulating state from a previous attempt.
+2. **Setup.** Generate each arm's isolated config and workspace, mint a run id that is threaded through every downstream artifact, and recreate the Atlas Search indexes the engine arms depend on.
+3. **Seed.** Run a fixed fact corpus into headless `claude -p` sessions for `stock`, `engine`, and `engine-native` (`control` is never seeded).
+4. **Consolidate.** Run the consolidator until every engine-arm database reports fully drained, so every seeded fact has had a chance to become a belief before any recall question is asked.
+5. **Capture check.** Measure what fraction of seeded facts actually landed in each arm's memory store, so a low recall score can later be told apart from a low capture rate.
+6. **Recall.** Ask a fixed set of recall questions in fresh sessions, multiple trials per fact, across all four arms.
+7. **Grade and adjudicate.** Keyword-grade the raw answers, run the blinded LLM judge cross-check, have a human review its disagreements, and re-grade with any accepted overrides merged in.
+8. **Report.** Render the final `REPORT.md`.
+
+See `demo/gauntlet/README.md` for the exact command behind each stage and the full provenance and resume rules.
+
+### Grading and adjudication
+
+Each fact carries an `expected_any` and a `wrong_any` keyword list. Grading matches those keywords against the recorded answer text on word boundaries, not as a plain substring, so "Render" does not match inside "rendered" and "15 minutes" does not match inside "115 minutes". Each trial gets one of four verdicts: **correct** (an expected keyword matched), **stale** (no expected match, but a superseded value's keyword matched), **miss** (neither matched), or **staleEcho** (a diagnostic flag on an otherwise-correct verdict, set when the answer recalled the current fact alongside a superseded one). Recall rates are reported with a Wilson 95% confidence interval, overall and by fact kind.
+
+Two layers sit on top of the raw keyword grade. A manual adjudication file lets a human override a specific trial's verdict, but every entry is validated strictly and bound to the exact answer text by a sha256 hash, so a stale override from a previous run can never silently reattach to a different answer that now occupies the same slot. Independently, a blinded, order-randomized LLM judge (`judge.mjs`) cross-checks the same raw grading against a fixed rubric, never told which arm produced an answer, and writes only its disagreements with the raw grade as a candidate list for human review, never as an auto-applied override. Its disclosed limitation: by default it judges with a model from the same family as the model that answered the recall questions, since both default to the same provider, so a different `LLM_PROVIDER` should be set for the judge where possible.
+
+### What this design controls for
+
+- **Contamination.** Native Claude Code auto-memory is quarantined and hard-gated for the engine arm, so a seeded fact cannot leak into that arm through the one store the benchmark is trying to hold constant.
+- **Self-adjudication.** The blinded, order-randomized LLM judge provides an independent cross-check of the keyword grading, instead of relying on a single unblinded human pass over the same product's own output.
+- **Provenance.** One run id is minted per run and checked against every artifact; the final report refuses to render if any of them disagree, so state from two different runs can never be merged into one number.
+- **Substring grading.** Keyword matching is word-boundary-safe, not a plain substring test, so common false positives cannot silently inflate a score.
+- **Masked production timeouts.** The harness applies no special timeout override for either engine arm: production's fail-open budget applies unless the operator explicitly sets one, and that choice must be disclosed alongside any published number.
+- **Guessability.** The `control` arm establishes what a memoryless model gets right on its own, so a win on a fact `control` also gets right can be read against that baseline instead of credited to memory.
+
+### Long-horizon coverage
+
+`demo/gauntlet/v2/` extends the four-arm benchmark with three standalone scenarios that exercise long-horizon behavior the arms above do not: brief ranking when 200 competing beliefs put real pressure on the token cap, a multi-session correction chain that has to reconcile against an already-consolidated belief store, and a forget-then-recall check that verifies a tombstoned fact stays gone from the belief, the recompiled brief, the local brief cache, and fresh-session recall alike. See `demo/gauntlet/v2/README.md` for the full scenario detail.
+
+### Latest results
+
+Run date 2026-07-14, run id `2cf1bee3-cbea-49a3-925e-d373c33d3ca0`, model `claude-sonnet-5`. Recall, adjudicated (95% Wilson CI):
+
+| Arm | Recall | Capture |
+|---|---|---|
+| Guessability baseline (no memory) | 2/24 (8%, CI 2-26%) | not applicable |
+| Stock (native memory) | 14/24 (58%, CI 39-76%) | 7/12 (58%) |
+| Engine (Atlas memory) | 18/24 (75%, CI 55-88%) | 11/12 (92%) |
+| Engine + native (combined) | 24/24 (100%, CI 86-100%) | 12/12 (100%) |
+
+18 of 96 recorded answers were manually adjudicated after reading the full answer text, each bound to its exact recorded answer by a sha256 hash; raw keyword numbers are reported alongside these in `demo/gauntlet/REPORT.md`.
+
+The engine-only arm's recall moved down from a prior clean run's 92% to this run's 75%: two facts that were confirmed present in the engine's belief store were not asserted in the recall answer, with the model instead treating the SessionStart-injected brief content as unverified rather than repeating it as fact. The engine + native arm, which has the same facts available through native project files rather than only through the hook payload, recalled both without hedging. This is disclosed rather than smoothed over: see the "Run notes and incidents" section of `demo/gauntlet/REPORT.md` for the full mechanism and evidence, and treat the engine-only number as needing a dedicated follow-up run before being read as stable. The engine + native (combined) number, the realistic day-to-day configuration for most engine users, is unaffected.
+
+See `demo/gauntlet/REPORT.md` (gitignored and local-only) for the full per-fact breakdown, adjudication appendix, and run notes.
+
+### Running it yourself
+
+Benchmark facts and results (`facts.json`, `REPORT.md`, adjudications, run state) are gitignored and local-only: a fresh clone needs `facts.json` supplied by the maintainer before any gauntlet script can run. See `demo/gauntlet/README.md` for the full run order, environment variable table, and integrity guarantees.
