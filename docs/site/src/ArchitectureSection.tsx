@@ -11,6 +11,7 @@ import {
   FileText,
   ArrowRight,
   ArrowDown,
+  ExternalLink,
 } from 'lucide-react';
 
 type IconType = typeof Database;
@@ -138,6 +139,15 @@ function ArchitectureSection() {
         <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
           Claude Code only ever reaches memory through three doors: hooks, a slash command, and an MCP server.
         </p>
+        <a
+          href="https://github.com/saiteja05/mongo-claude-memory#architecture-overview"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-4 sm:mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-[#336443] hover:text-[#1f2a1d] transition-colors"
+        >
+          More info
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
       </div>
 
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-stretch md:items-center gap-6">

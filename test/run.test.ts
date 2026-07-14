@@ -1,7 +1,33 @@
-import { describe, it, expect, vi } from "vitest";
-import { runConsolidation, fetchExistingBeliefs, markConsolidated } from "../src/consolidation/run.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  runConsolidation,
+  fetchExistingBeliefs,
+  markConsolidated,
+  markObservationFailed,
+} from "../src/consolidation/run.js";
 import type { RunConsolidationDeps } from "../src/consolidation/run.js";
 import { BELIEFS, OBSERVATIONS } from "../src/db/schema.js";
+import { NonRetryableLLMError } from "../src/llm/errors.js";
+
+let savedFailureLog: string | undefined;
+
+beforeEach(() => {
+  savedFailureLog = process.env.MEMORY_FAILURE_LOG;
+  // extractWithSplit's terminal single-observation failure path calls
+  // appendFailure; redirect it to a scratch file so these tests never touch
+  // the real ~/.mongo-claude-memory/failures.log.
+  process.env.MEMORY_FAILURE_LOG = path.join(
+    tmpdir(),
+    "mongo-claude-memory-run-test-failures.log"
+  );
+});
+
+afterEach(() => {
+  if (savedFailureLog === undefined) delete process.env.MEMORY_FAILURE_LOG;
+  else process.env.MEMORY_FAILURE_LOG = savedFailureLog;
+});
 
 function makeDeps(overrides: Partial<RunConsolidationDeps> = {}): RunConsolidationDeps {
   return {
@@ -11,6 +37,10 @@ function makeDeps(overrides: Partial<RunConsolidationDeps> = {}): RunConsolidati
     reclaimAfterMs: 600000,
     beliefsContextLimit: 30,
     dedupeSimilarityThreshold: 0.93,
+    // Matches config's default (3): most tests never approach the breaker,
+    // only the ones in the "circuit breaker" describe block below override
+    // it to a small number to make tripping it easy to arrange.
+    maxConsecutiveTerminalExtractionFailures: 3,
     reclaimStale: vi.fn(async () => 0),
     acquireLease: vi.fn(async () => true),
     renewLease: vi.fn(async () => true),
@@ -22,6 +52,10 @@ function makeDeps(overrides: Partial<RunConsolidationDeps> = {}): RunConsolidati
     // default: omitting this would fall through to the real classifyInjection,
     // which calls the real LLM provider dispatcher.
     classifyInjection: vi.fn(async () => ({ isInjection: false })),
+    // Explicitly stubbed, never left to the real default: omitting this
+    // would fall through to the real quarantineDroppedCandidate, which calls
+    // loadConfig() and a real db collection.
+    quarantineDropped: vi.fn(async () => undefined),
     embed: vi.fn(async () => [[0.1, 0.2]]),
     upsertBelief: vi.fn(async () => ({ beliefId: "belief-1", action: "insert" as const })),
     compileBrief: vi.fn(async () => undefined),
@@ -284,9 +318,12 @@ describe("runConsolidation", () => {
     const result = await runConsolidation(fakeDb, "proj", deps);
 
     expect(result).toEqual({ processed: 0, skipped: false });
-    // The per-candidate loop body (renewLease, embed, upsertBelief) never
-    // runs at all when there are zero candidates to iterate.
-    expect(deps.renewLease).not.toHaveBeenCalled();
+    // renewLease is called exactly once: extractWithSplit renews the lease
+    // before its single (unsplit, successful) extractFacts attempt. The
+    // per-candidate loop body (a second renewLease per candidate, embed,
+    // upsertBelief) never runs at all when there are zero candidates to
+    // iterate.
+    expect(deps.renewLease).toHaveBeenCalledTimes(1);
     expect(deps.embed).not.toHaveBeenCalled();
     expect(deps.upsertBelief).not.toHaveBeenCalled();
     // Still fully processed: the project brief is recompiled and the whole
@@ -347,6 +384,7 @@ describe("runConsolidation", () => {
     ];
     const renewLease = vi
       .fn()
+      .mockResolvedValueOnce(true) // extractWithSplit's pre-extraction renewal
       .mockResolvedValueOnce(true) // still holding for candidate 1
       .mockResolvedValueOnce(false); // lost the lease before candidate 2
     const deps = makeDeps({
@@ -392,6 +430,432 @@ describe("runConsolidation", () => {
 
     expect(deps.releaseLease).toHaveBeenCalledTimes(1);
     expect(deps.markConsolidated).not.toHaveBeenCalled();
+  });
+
+  it("marks a single observation failed (terminal, no retry) when extractFacts fails non-retryably on a batch of one, and excludes it from markConsolidated", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const markFailed = vi.fn(async () => undefined);
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => {
+        throw new NonRetryableLLMError("extraction output truncated; reduce batch size");
+      }),
+      markFailed,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result).toEqual({ processed: 0, skipped: false });
+    expect(markFailed).toHaveBeenCalledTimes(1);
+    expect(markFailed).toHaveBeenCalledWith(fakeDb, "proj", "run-1", "obs-1", "NonRetryableLLMError");
+    // The failed observation is excluded from markConsolidated: it was moved
+    // to a terminal "failed" status, not "consolidated".
+    expect(deps.markConsolidated).toHaveBeenCalledWith(fakeDb, "proj", "run-1", []);
+    expect(deps.compileBrief).toHaveBeenCalledWith(fakeDb, "proj");
+    expect(deps.upsertBelief).not.toHaveBeenCalled();
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalled(); // logged the terminal failure
+
+    errorSpy.mockRestore();
+  });
+
+  it("propagates a transient (non-NonRetryableLLMError) extraction failure immediately, without splitting the batch or marking any observation failed", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const extractFacts = vi.fn(async () => {
+      throw new Error("rate limited");
+    });
+    const markFailed = vi.fn();
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts,
+      markFailed,
+    });
+
+    await expect(runConsolidation(fakeDb, "proj", deps)).rejects.toThrow("rate limited");
+
+    // A transient failure is never split: dividing the batch does nothing
+    // for a network blip or rate limit that will recover on retry regardless
+    // of batch size, so extractFacts is called exactly once, on the whole
+    // batch, before the error propagates.
+    expect(extractFacts).toHaveBeenCalledTimes(1);
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+  });
+
+  it("splits a batch when extraction fails non-retryably, isolating and marking failed only the single poison observation while still processing the rest", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-3", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-4", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const poisonId = "obs-2";
+    const extractFacts = vi.fn(async (observations: { _id: string }[]) => {
+      if (observations.some((o) => o._id === poisonId)) {
+        throw new NonRetryableLLMError("batch contains an oversized observation");
+      }
+      return observations.map((o) => ({
+        text: `fact from ${o._id}`,
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: [o._id],
+        supersedes_belief_id: null,
+      }));
+    });
+    const markFailed = vi.fn(async () => undefined);
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts,
+      markFailed,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result.processed).toBe(3); // obs-1, obs-3, obs-4 each yield one fact
+    expect(markFailed).toHaveBeenCalledTimes(1);
+    expect(markFailed).toHaveBeenCalledWith(fakeDb, "proj", "run-1", "obs-2", "NonRetryableLLMError");
+    // Recursive splitting isolates the poison observation on its own:
+    // extractFacts is called more than once (the whole batch, then
+    // progressively smaller halves) rather than failing the whole batch
+    // permanently.
+    expect(extractFacts.mock.calls.length).toBeGreaterThan(1);
+    const markConsolidatedIds = (deps.markConsolidated as ReturnType<typeof vi.fn>).mock
+      .calls[0][3] as string[];
+    expect(new Set(markConsolidatedIds)).toEqual(new Set(["obs-1", "obs-3", "obs-4"]));
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
+  });
+
+  it("stops mid-split and reports leaseLost when the lease is lost before a split half's extraction attempt, without calling extractFacts on that half or its sibling", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const extractFacts = vi.fn(async (observations: unknown[]) => {
+      if (observations.length > 1) {
+        throw new NonRetryableLLMError("batch too large");
+      }
+      return [];
+    });
+    const renewLease = vi
+      .fn()
+      .mockResolvedValueOnce(true) // pre-extraction renewal for the whole batch
+      .mockResolvedValueOnce(false); // pre-extraction renewal for the left half: lease lost
+    const markFailed = vi.fn();
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts,
+      renewLease,
+      markFailed,
+    });
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result).toEqual({ processed: 0, skipped: false, leaseLost: true });
+    // Only the initial whole-batch attempt: the left half never gets to call
+    // extractFacts because its own pre-extraction lease renewal already
+    // reported the lease lost, and the right half (the sibling) is never
+    // attempted once the left half reports leaseLost.
+    expect(extractFacts).toHaveBeenCalledTimes(1);
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(deps.compileBrief).not.toHaveBeenCalled();
+    expect(deps.markConsolidated).not.toHaveBeenCalled();
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+  });
+
+  describe("circuit breaker (consecutive single-observation terminal failures)", () => {
+    it("trips after exactly N consecutive single-observation terminal failures, aborting the run without ever calling markConsolidated, still releasing the lease, and logging the count and the last failure's error NAME", async () => {
+      // Simulates the incident: every extraction call fails non-retryably
+      // (a dead API key), so the whole batch and every split half fail too.
+      // With the limit injected as 2, the breaker must trip on the second
+      // single-observation leaf failure, never reaching obs-3/obs-4.
+      const claimed = [
+        { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-3", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-4", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      ];
+      const extractFacts = vi.fn(async () => {
+        throw new NonRetryableLLMError("invalid api key");
+      });
+      const markFailed = vi.fn(async () => undefined);
+      const deps = makeDeps({
+        claimBatch: vi.fn(async () => claimed as any),
+        extractFacts,
+        markFailed,
+        maxConsecutiveTerminalExtractionFailures: 2,
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      await expect(runConsolidation(fakeDb, "proj", deps)).rejects.toThrow();
+
+      expect(markFailed).toHaveBeenCalledTimes(2);
+      expect(markFailed).toHaveBeenNthCalledWith(1, fakeDb, "proj", "run-1", "obs-1", "NonRetryableLLMError");
+      expect(markFailed).toHaveBeenNthCalledWith(2, fakeDb, "proj", "run-1", "obs-2", "NonRetryableLLMError");
+      // Exactly 4 extractFacts calls: the whole batch, then [obs-1,obs-2],
+      // then the obs-1 and obs-2 leaves. The top-level right half
+      // ([obs-3,obs-4]) is never even attempted, since the breaker aborts
+      // while still awaiting the left half's result.
+      expect(extractFacts).toHaveBeenCalledTimes(4);
+      expect(deps.markConsolidated).not.toHaveBeenCalled();
+      expect(deps.compileBrief).not.toHaveBeenCalled();
+      // Lease still released even though the run aborted: consolidation must
+      // never wedge.
+      expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+
+      const logged = errorSpy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("circuit breaker tripped");
+      expect(logged).toContain("2 consecutive");
+      expect(logged).toContain("NonRetryableLLMError");
+
+      errorSpy.mockRestore();
+    });
+
+    it("does not trip when the same number of total single-observation failures occurs but a success always intervenes between them (never consecutive)", async () => {
+      const claimed = [
+        { _id: "obs-A", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-B", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-C", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+        { _id: "obs-D", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      ];
+      // obs-A and obs-C are poison (always fail non-retryably, alone or in
+      // any group that contains them); obs-B and obs-D always succeed alone.
+      // The batch splits into [A,B] and [C,D], so each poison observation's
+      // single-observation failure is separated from the other by a
+      // successful extraction (B, then D), resetting the counter each time:
+      // two total single-observation failures, zero of them consecutive.
+      const poisonIds = new Set(["obs-A", "obs-C"]);
+      const extractFacts = vi.fn(async (observations: { _id: string }[]) => {
+        if (observations.some((o) => poisonIds.has(o._id))) {
+          throw new NonRetryableLLMError("batch contains an oversized observation");
+        }
+        return observations.map((o) => ({
+          text: `fact from ${o._id}`,
+          type: "preference" as const,
+          scope: "project" as const,
+          importance: 0.5,
+          observation_ids: [o._id],
+          supersedes_belief_id: null,
+        }));
+      });
+      const markFailed = vi.fn(async () => undefined);
+      const deps = makeDeps({
+        claimBatch: vi.fn(async () => claimed as any),
+        extractFacts,
+        markFailed,
+        maxConsecutiveTerminalExtractionFailures: 2,
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const result = await runConsolidation(fakeDb, "proj", deps);
+
+      expect(result.processed).toBe(2); // obs-B and obs-D each yield one fact
+      expect(markFailed).toHaveBeenCalledTimes(2);
+      expect(markFailed).toHaveBeenCalledWith(fakeDb, "proj", "run-1", "obs-A", "NonRetryableLLMError");
+      expect(markFailed).toHaveBeenCalledWith(fakeDb, "proj", "run-1", "obs-C", "NonRetryableLLMError");
+      // Never trips: the run completes normally and marks the survivors
+      // consolidated, unlike the aborted-run case above.
+      const markConsolidatedIds = (deps.markConsolidated as ReturnType<typeof vi.fn>).mock
+        .calls[0][3] as string[];
+      expect(new Set(markConsolidatedIds)).toEqual(new Set(["obs-B", "obs-D"]));
+      expect(deps.compileBrief).toHaveBeenCalledWith(fakeDb, "proj");
+      expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+
+      const logged = errorSpy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).not.toContain("circuit breaker tripped");
+
+      errorSpy.mockRestore();
+    });
+  });
+
+  it("quarantines a deny-list-dropped candidate with stage 'deny-list', the full text, and its observation ids", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const invalidCandidate = {
+      text: "", // invalid: fails validateBeliefText (empty text)
+      type: "preference" as const,
+      scope: "project" as const,
+      importance: 0.5,
+      observation_ids: ["obs-2"],
+      supersedes_belief_id: null,
+    };
+    const candidates = [
+      {
+        text: "The user prefers tabs.",
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1"],
+        supersedes_belief_id: null,
+      },
+      invalidCandidate,
+    ];
+    const quarantineDropped = vi.fn(async () => undefined);
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      quarantineDropped,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await runConsolidation(fakeDb, "proj", deps);
+
+    expect(quarantineDropped).toHaveBeenCalledTimes(1);
+    expect(quarantineDropped).toHaveBeenCalledWith(
+      fakeDb,
+      "proj",
+      "run-1",
+      invalidCandidate,
+      "deny-list",
+      "text is empty"
+    );
+
+    errorSpy.mockRestore();
+  });
+
+  it("quarantines a classifier-dropped candidate with stage 'classifier' and the classifier's reason", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const flaggedCandidate = {
+      // Deliberately clean of any deterministic deny-list pattern so it
+      // reaches classifyInjection rather than being dropped earlier.
+      text: "The project uses ESLint for linting.",
+      type: "convention" as const,
+      scope: "project" as const,
+      importance: 0.5,
+      observation_ids: ["obs-2"],
+      supersedes_belief_id: null,
+    };
+    const candidates = [
+      {
+        text: "The user prefers tabs.",
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1"],
+        supersedes_belief_id: null,
+      },
+      flaggedCandidate,
+    ];
+    const classifyInjection = vi
+      .fn()
+      .mockResolvedValueOnce({ isInjection: false })
+      .mockResolvedValueOnce({ isInjection: true, reason: "reads like an instruction to the assistant" });
+    const quarantineDropped = vi.fn(async () => undefined);
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      classifyInjection,
+      quarantineDropped,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await runConsolidation(fakeDb, "proj", deps);
+
+    expect(quarantineDropped).toHaveBeenCalledTimes(1);
+    expect(quarantineDropped).toHaveBeenCalledWith(
+      fakeDb,
+      "proj",
+      "run-1",
+      flaggedCandidate,
+      "classifier",
+      "reads like an instruction to the assistant"
+    );
+
+    errorSpy.mockRestore();
+  });
+
+  it("does not fail the run, and still marks the batch consolidated, when the quarantine dependency itself rejects", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const candidates = [
+      {
+        text: "", // invalid: fails validateBeliefText, drops into the quarantine path
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1"],
+        supersedes_belief_id: null,
+      },
+    ];
+    const quarantineDropped = vi.fn(async () => {
+      throw new Error("quarantine insert failed");
+    });
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      quarantineDropped,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result).toEqual({ processed: 0, skipped: false });
+    expect(quarantineDropped).toHaveBeenCalledTimes(1);
+    expect(deps.markConsolidated).toHaveBeenCalledWith(fakeDb, "proj", "run-1", ["obs-1"]);
+    expect(deps.compileBrief).toHaveBeenCalledWith(fakeDb, "proj");
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
+  });
+
+  it("still marks the whole batch consolidated when every candidate is dropped (deny-list or classifier)", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const candidates = [
+      {
+        text: "", // invalid: dropped by validateCandidateFact
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1"],
+        supersedes_belief_id: null,
+      },
+      {
+        text: "A perfectly clean candidate fact.", // dropped by the classifier instead
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-2"],
+        supersedes_belief_id: null,
+      },
+    ];
+    const classifyInjection = vi.fn(async () => ({ isInjection: true, reason: "flagged" }));
+    const quarantineDropped = vi.fn(async () => undefined);
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      classifyInjection,
+      quarantineDropped,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result).toEqual({ processed: 0, skipped: false });
+    expect(quarantineDropped).toHaveBeenCalledTimes(2);
+    expect(deps.upsertBelief).not.toHaveBeenCalled();
+    expect(deps.markConsolidated).toHaveBeenCalledWith(fakeDb, "proj", "run-1", ["obs-1", "obs-2"]);
+    expect(deps.compileBrief).toHaveBeenCalledWith(fakeDb, "proj");
+    expect(deps.releaseLease).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
   });
 });
 
@@ -450,8 +914,26 @@ describe("markConsolidated", () => {
 
     expect(collectionFn).toHaveBeenCalledWith(OBSERVATIONS);
     expect(updateManyFn).toHaveBeenCalledWith(
-      { _id: { $in: ["obs-1", "obs-2"] }, project: "proj", run_id: "run-1" },
+      { _id: { $in: ["obs-1", "obs-2"] }, project: "proj", run_id: "run-1", status: "claimed" },
       { $set: { status: "consolidated" } }
     );
+  });
+});
+
+describe("markObservationFailed", () => {
+  it("updates only the observation matching _id, the project, and the run_id while still claimed, setting status to failed with failed_at/failure_reason", async () => {
+    const updateOneFn = vi.fn(async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 }));
+    const collectionFn = vi.fn(() => ({ updateOne: updateOneFn }));
+    const db = { collection: collectionFn } as any;
+
+    await markObservationFailed(db, "proj", "run-1", "obs-1", "NonRetryableLLMError");
+
+    expect(collectionFn).toHaveBeenCalledWith(OBSERVATIONS);
+    expect(updateOneFn).toHaveBeenCalledTimes(1);
+    const [filter, update] = updateOneFn.mock.calls[0] as [Record<string, unknown>, any];
+    expect(filter).toEqual({ _id: "obs-1", project: "proj", run_id: "run-1", status: "claimed" });
+    expect(update.$set.status).toBe("failed");
+    expect(update.$set.failure_reason).toBe("NonRetryableLLMError");
+    expect(update.$set.failed_at).toBeInstanceOf(Date);
   });
 });

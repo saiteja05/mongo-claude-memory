@@ -1,4 +1,5 @@
 import { loadConfig } from "../config.js";
+import { NonRetryableLLMError, isNonRetryableLLMError } from "./errors.js";
 
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -25,8 +26,6 @@ function sleep(ms: number): Promise<void> {
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
-
-class NonRetryableAnthropicError extends Error {}
 
 /**
  * Generic Anthropic Messages API client, mirroring src/embeddings/voyage.ts's
@@ -84,7 +83,7 @@ export async function callWithTool(
 
       if (!response.ok) {
         if (!isRetryableStatus(response.status)) {
-          throw new NonRetryableAnthropicError(
+          throw new NonRetryableLLMError(
             `Anthropic messages request failed with non-retryable status ${response.status}`
           );
         }
@@ -101,7 +100,7 @@ export async function callWithTool(
       // (a retry would truncate identically) so the batch stays claimed and
       // reclaimable.
       if (json.stop_reason === "max_tokens") {
-        throw new NonRetryableAnthropicError(
+        throw new NonRetryableLLMError(
           "extraction output truncated by max_tokens; reduce batch size"
         );
       }
@@ -111,7 +110,7 @@ export async function callWithTool(
       );
 
       if (!toolUse) {
-        throw new NonRetryableAnthropicError(
+        throw new NonRetryableLLMError(
           `Anthropic response did not include a tool_use block for "${toolName}"`
         );
       }
@@ -119,7 +118,7 @@ export async function callWithTool(
       return toolUse.input;
     } catch (err) {
       lastError = err;
-      if (err instanceof NonRetryableAnthropicError) {
+      if (isNonRetryableLLMError(err)) {
         break;
       }
       if (attempt < MAX_ATTEMPTS) {
@@ -136,5 +135,11 @@ export async function callWithTool(
   }
 
   const reason = lastError instanceof Error ? lastError.message : "unknown error";
-  throw new Error(`Anthropic messages call failed after ${MAX_ATTEMPTS} attempts: ${reason}`);
+  const message = `Anthropic messages call failed after ${MAX_ATTEMPTS} attempts: ${reason}`;
+  // Classification-preserving: a non-retryable underlying cause (truncated
+  // output, missing tool_use, a permanent HTTP status) stays a
+  // NonRetryableLLMError through this wrap, so consolidation's split-retry
+  // can tell "retrying the same input will never work" apart from a
+  // transient failure that exhausted all attempts.
+  throw isNonRetryableLLMError(lastError) ? new NonRetryableLLMError(message) : new Error(message);
 }

@@ -17,6 +17,7 @@ For the full design rationale, verified Atlas capability matrix, and phased impl
   - [`beliefs`](#beliefs)
   - [`briefs`](#briefs)
   - [`locks`](#locks)
+  - [`dropped_candidates`](#dropped_candidates)
 - [Getting started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Install and build](#install-and-build)
@@ -40,7 +41,9 @@ For the full design rationale, verified Atlas capability matrix, and phased impl
 - [Search pipeline](#search-pipeline)
 - [Operations](#operations)
   - [Safety properties](#safety-properties)
+  - [Offline brief cache](#offline-brief-cache)
 - [Development](#development)
+- [Benchmarking (the memory gauntlet)](#benchmarking-the-memory-gauntlet)
 
 ---
 
@@ -127,7 +130,7 @@ This system integrates through Claude Code's public extension points only, so it
 
 ## Data model
 
-Four collections, defined in `src/db/schema.ts`.
+Five collections, defined in `src/db/schema.ts`.
 
 ### `observations`
 Raw, high-volume capture. Append-only; never updated except by the consolidator's claim/consolidate lifecycle.
@@ -139,11 +142,15 @@ Raw, high-volume capture. Append-only; never updated except by the consolidator'
 | `source` | `"transcript" \| "remember" \| "hash_line" \| "mcp_write"` | Capture path |
 | `priority` | `"normal" \| "high"` | High-priority captures never expire |
 | `text` | string | Raw content or a transcript-summary chunk |
-| `status` | `"pending" \| "claimed" \| "consolidated"` | Lifecycle state |
+| `status` | `"pending" \| "claimed" \| "consolidated" \| "failed"` | Lifecycle state; `failed` is terminal and excluded from reclaim and reprocessing |
 | `run_id` | string (optional) | Set when claimed, for idempotent reprocessing |
 | `claimed_at` | Date (optional) | For lease/reclaim on crash |
 | `created_at` | Date | |
 | `expiresAt` | Date (optional) | TTL target; unset for high-priority captures |
+| `chunk_index` | number (optional) | 0-based position of this chunk within its session's transcript capture |
+| `chunk_count` | number (optional) | Total chunks in this session's capture |
+| `failed_at` | Date (optional) | Set together with `failure_reason` when status becomes `failed` |
+| `failure_reason` | string (optional) | Terminal extraction failure's error name only, never its message |
 
 ### `beliefs`
 Consolidated, durable, polymorphic facts. The only collection with a single logical writer (the consolidator), aside from two narrow exceptions (`memory_forget` tombstone, `use_count` increments).
@@ -190,6 +197,21 @@ The TTL lease enforcing one active consolidator run per project.
 | `_id` | string | `"consolidate:" + project` |
 | `holder` | string | `run_id` of the current lease holder |
 | `heldUntil` | Date | Lease expiry; a crashed holder self-expires |
+
+### `dropped_candidates`
+Quarantine for candidate facts rejected during consolidation, by either the deterministic deny-list validator or the LLM injection classifier, so a false-positive drop is recoverable instead of vanishing with only a short stderr line. TTL-bounded.
+
+| Field | Type | Notes |
+|---|---|---|
+| `project` | string | Or `"global"` |
+| `run_id` | string | The consolidation run that dropped this candidate |
+| `stage` | `"deny-list" \| "classifier"` | Which check dropped it |
+| `reason` | string | Truncated to 500 characters at write time |
+| `text` | string | The full candidate text, kept recoverable, never truncated |
+| `type` / `scope` / `importance` | optional | Carried over from the candidate fact when present |
+| `observation_ids` | `string[]` | Provenance |
+| `created_at` | Date | |
+| `expiresAt` | Date | TTL target, `DROPPED_CANDIDATE_TTL_DAYS` days out (default 30) |
 
 ---
 
@@ -239,9 +261,10 @@ All configuration is loaded by `loadConfig()` in `src/config.ts`. Nothing is req
 | `AWS_REGION` / `BEDROCK_REGION` | `us-east-1` | AWS region for the Bedrock Converse API |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address, used when `LLM_PROVIDER=ollama` |
 | `OLLAMA_MODEL` | `llama3.1` | Model name to call for fact extraction when `LLM_PROVIDER=ollama`; must be pulled locally and support tool/function calling |
+| `OLLAMA_CONTEXT_TOKENS` | `8192` | Context window, in tokens, requested from the local Ollama server for extraction calls (`num_ctx`), and the value used to size the extraction batch for it (see `CONSOLIDATION_BATCH_MAX_CHARS`); minimum `1024` |
 | `CONSOLIDATION_LEASE_MS` | `300000` | Per-project consolidation lease duration |
 | `CONSOLIDATION_BATCH_SIZE` | `50` | Observations claimed per run (document count bound) |
-| `CONSOLIDATION_BATCH_MAX_CHARS` | `300000` | Total text-length budget per claimed batch; at least one observation is always taken. Bounds the extraction prompt in characters, since a count-only bound can exceed the model's context limit on large transcript observations |
+| `CONSOLIDATION_BATCH_MAX_CHARS` | model-aware, unset by default | Total text-length budget per claimed batch; at least one observation is always taken. Bounds the extraction prompt in characters, since a count-only bound can exceed the model's context limit on large transcript observations. When unset, defaults to a value derived from the configured consolidation model's context window (200k tokens for Anthropic and Bedrock's Anthropic cross-region profiles, `OLLAMA_CONTEXT_TOKENS` for Ollama), rather than one fixed number regardless of provider; an explicit setting here always wins |
 | `CONSOLIDATION_RECLAIM_MS` | `600000` | Age after which a stale `claimed` observation is reclaimed to `pending`; also the age at which a crashed run's project is rediscovered by the no-argument consolidator |
 | `CONSOLIDATION_BELIEFS_CONTEXT_LIMIT` | `30` | Existing beliefs passed to the LLM as dedup/context (most recently updated first) |
 | `CONSOLIDATION_DEDUPE_THRESHOLD` | `0.93` | Vector similarity threshold above which a candidate fact is treated as a duplicate of an existing belief |
@@ -261,7 +284,7 @@ Run once against a fresh Atlas database, and safely re-run at any time (every st
 npm run setup:indexes
 ```
 
-This creates the four collections if missing, the observation TTL index, the beliefs compound index and archival TTL index, the vector search index matching the current `EMBEDDING_MODE` (`beliefs_vec` for app-side embeddings, `beliefs_vec_auto` for Atlas `autoEmbed`, only one is created, not both), and the `beliefs_text` BM25 search index. Search-index creation failures (for example, a Preview feature not enabled on a given cluster) are logged and skipped without blocking the rest of setup.
+This creates the five collections if missing, the observation TTL index, the dropped-candidate TTL index, the beliefs compound index and archival TTL index, the vector search index matching the current `EMBEDDING_MODE` (`beliefs_vec` for app-side embeddings, `beliefs_vec_auto` for Atlas `autoEmbed`, only one is created, not both), and the `beliefs_text` BM25 search index. Search-index creation failures (for example, a Preview feature not enabled on a given cluster) are logged and skipped without blocking the rest of setup.
 
 ### Hook registration
 
@@ -299,9 +322,9 @@ Once the hooks and MCP server are registered (see Getting started above), day-to
 
 Nothing to configure per session. Three hooks run without any user action:
 
-- **`SessionStart`** (startup, resume, clear, compact): fetches `brief:global` and `brief:<project>` with a single `findOne` each and injects their combined `content` as `additionalContext`. Conceptually, the injected brief reads like a short paragraph of standing facts and conventions, for example "Prefers pnpm over npm. This repo's CI gate is `npm run build && npm test`. Uses Bedrock in prod, Anthropic API in dev." It is capped at `BRIEF_CORE_TOKEN_CAP` (800 tokens, global) plus `BRIEF_PROJECT_TOKEN_CAP` (1200 tokens, per project), so it is always a small, fixed-size block, not the full memory store.
+- **`SessionStart`** (startup, resume, clear, compact): fetches `brief:global` and `brief:<project>` with a single `findOne` each and injects their combined `content` as `additionalContext`. Conceptually, the injected brief reads like a short paragraph of standing facts and conventions, for example "Prefers pnpm over npm. This repo's CI gate is `npm run build && npm test`. Uses Bedrock in prod, Anthropic API in dev." It is capped at `BRIEF_CORE_TOKEN_CAP` (800 tokens, global) plus `BRIEF_PROJECT_TOKEN_CAP` (1200 tokens, per project), so it is always a small, fixed-size block, not the full memory store. If the live fetch times out or errors, it falls back to a local cache of the last successfully fetched brief (see Offline brief cache under Operations); a healthy fetch that legitimately finds nothing never touches that cache.
 - **`UserPromptSubmit`**: any prompt whose first non-whitespace character is `#` is captured as a high-priority observation (`source: "hash_line"`), the same mechanism Claude Code's own quick-add uses. For example typing `# always run migrations before seeding` writes that line to `observations`; the prompt still passes through to Claude unmodified.
-- **`SessionEnd`**: captures the last 50,000 characters of the session transcript as one normal-priority observation (`source: "transcript"`), for the consolidator to later extract facts from. Before writing, it strips any exact occurrence of the currently injected brief content from the tail (echo-loop defense: the injected brief is memory output, not new evidence).
+- **`SessionEnd`**: captures the session transcript as one or more 50,000-character chunk observations (`source: "transcript"`), for the consolidator to later extract facts from, up to a total budget of `TRANSCRIPT_CAPTURE_MAX_CHARS` (500,000 characters by default, ten chunks). When a session's transcript exceeds that budget, the first chunk and the most recent chunks are kept, so a session's early decisions and its most recent outcomes both survive; the chunks in between are dropped, with only their combined character count logged, never their content. Each chunk carries its session id and its `chunk_index`/`chunk_count` position into extraction. Capture volume is sized independently of any model's context window: the two are separate constraints, and a large transcript capture is handled on the extraction side by the model-aware batch budget described under Diagnosing silent failures. Before writing, it strips any exact occurrence of the currently injected brief content from the full transcript, before chunking (echo-loop defense: the injected brief is memory output, not new evidence).
 
 All three hooks fail open: if MongoDB is unreachable or misconfigured, they no-op silently and exit `0`. You will never see a memory-path error surface in a session.
 
@@ -399,7 +422,7 @@ node dist/consolidation/cli.js
 node dist/consolidation/cli.js mongo-claude-memory
 ```
 
-A run acquires a per-project lease, claims a batch of pending observations, extracts facts with the configured LLM, embeds and vector-dedupes them against existing beliefs, upserts (or supersedes/archives) beliefs, recompiles the affected brief, and marks the batch consolidated.
+A run acquires a per-project lease, claims a batch of pending observations, extracts facts with the configured LLM, embeds and vector-dedupes them against existing beliefs, upserts (or supersedes/archives) beliefs, recompiles the affected brief, and marks the batch consolidated. A candidate fact that scores below the dedupe threshold but still close to an existing active belief (above `CONSOLIDATION_RECONCILE_THRESHOLD`, default 0.75) is not inserted outright: a small LLM arbitration call judges it against each such near neighbor, archiving and superseding a contradicted belief, merging into a duplicate, or falling through to a plain insert when the neighbor is unrelated or the arbitration call itself fails. This write-time reconciliation only runs when there is at least one near neighbor to check, so a genuinely new fact costs nothing extra.
 
 **Preview without writing anything:**
 
@@ -415,7 +438,7 @@ Runs the same extraction and dedup logic and reports what would change, without 
 node dist/consolidation/cli.js --status
 ```
 
-Reports pending/claimed/consolidated observation counts, stale-claim counts, current lock/lease state, belief counts by project and status, and brief metadata, all as a point-in-time snapshot. No LLM call.
+Reports pending/claimed/consolidated/failed observation counts, stale-claim counts, current lock/lease state, belief counts by project and status, quarantined dropped-candidate counts by project and stage, and brief metadata, all as a point-in-time snapshot. No LLM call.
 
 **Undo a bad run:**
 
@@ -424,6 +447,14 @@ node dist/consolidation/cli.js --rollback --run-id <id>
 ```
 
 (or `--rollback <id>` as a bare positional). Reverts the belief and brief changes made by that specific run, using each belief's provenance (`observation_ids`, `supersedes`, `generation`). Find the run id in the consolidator's own log output or via `--status`.
+
+**Heal contradictory or duplicate active beliefs:**
+
+```bash
+node dist/consolidation/cli.js --reconcile mongo-claude-memory
+```
+
+Sweeps the named project's active beliefs pairwise by similarity, has the LLM arbitrate each pair it finds (the belief backed by newer evidence survives), and archives the superseded or duplicate older belief, recompiling affected briefs and, for duplicates, merging provenance onto the survivor. Bounded by `CONSOLIDATION_RECONCILE_MAX_PAIRS` LLM calls per run (default 25); requires LLM credentials, unlike `--status`. This is the retroactive counterpart to the write-time reconciliation described above: use it to heal beliefs that predate that check or slipped past it. A project argument is required; there is no all-projects mode for `--reconcile`.
 
 ---
 
@@ -494,6 +525,7 @@ The consolidator CLI (`src/consolidation/cli.ts`, `node dist/consolidation/cli.j
 - **Dry run**: `node dist/consolidation/cli.js [project] --dry-run`. Runs extraction and dedup logic and reports what would change, without writing anything.
 - **Status**: `node dist/consolidation/cli.js --status`. Reports pending/claimed/consolidated observation counts and lease state, without touching the LLM.
 - **Rollback**: `node dist/consolidation/cli.js --rollback --run-id <id>` (or `--rollback <id>`). Reverts the belief and brief changes made by a specific consolidation run, using each belief's provenance (`observation_ids`, `supersedes`, `generation`).
+- **Reconcile**: `node dist/consolidation/cli.js --reconcile <project>`. Sweeps a project's active beliefs pairwise by similarity, arbitrates each pair with the LLM (the belief backed by newer evidence survives), and archives the superseded or duplicate older belief with the same version-guarded compare-and-swap discipline as the rest of the pipeline, recompiling affected briefs and unioning provenance for duplicates. Bounded by `CONSOLIDATION_RECONCILE_MAX_PAIRS` LLM calls per run; requires LLM credentials. An operator-invoked heal for contradictory or duplicate active beliefs that predate write-time reconciliation, not something the pipeline calls itself.
 
 ### Safety properties
 
@@ -501,14 +533,27 @@ The consolidator CLI (`src/consolidation/cli.ts`, `node dist/consolidation/cli.j
 - **Idempotent writes**: belief upserts are keyed by semantic similarity against the `CONSOLIDATION_DEDUPE_THRESHOLD`, so reprocessing the same observations after a crash never creates duplicate beliefs.
 - **Never-throw hooks**: `SessionStart`, `UserPromptSubmit`, and `SessionEnd` all wrap their entire body in a fail-open guard; any failure, including a missing connection string, results in a silent no-op and a clean process exit, never a visible error to the session.
 - **Injection deny-list**: extracted facts pass a schema and content validator before being written as beliefs (no imperative-to-the-assistant phrasing, no tool or hook directives), since observation text is untrusted transcript content and must never be treated as an instruction to the extraction LLM or to future sessions.
-- **TTL cleanup**: normal-priority observations expire after `OBSERVATION_TTL_DAYS` (default 30); archived or tombstoned beliefs expire after 90 days via a partial TTL index. High-priority captures (`/remember`, `hash_line`, `mcp_write`) never expire as observations, and active beliefs are never hard-deleted by the pipeline, only archived or tombstoned with provenance.
+- **Extraction resilience**: a claimed batch that fails LLM extraction non-retryably is split in half and retried, isolating the single observation actually responsible instead of re-failing the same batch identically forever; a transient failure (network blip, rate limit) keeps its normal retry semantics untouched.
+- **TTL cleanup**: normal-priority observations expire after `OBSERVATION_TTL_DAYS` (default 30); archived or tombstoned beliefs expire after 90 days via a partial TTL index; quarantined dropped candidates expire after `DROPPED_CANDIDATE_TTL_DAYS` (default 30). High-priority captures (`/remember`, `hash_line`, `mcp_write`) never expire as observations, and active beliefs are never hard-deleted by the pipeline, only archived or tombstoned with provenance.
 
 ### Diagnosing silent failures
 
-The hooks fail open by design: when MongoDB, Voyage, or the LLM is unreachable, a session behaves like stock Claude Code with no visible error. Two tools exist so "silently doing nothing" is still diagnosable:
+The hooks fail open by design: when MongoDB, Voyage, or the LLM is unreachable, a session behaves like stock Claude Code with no visible error. A few tools exist so "silently doing nothing" is still diagnosable:
 
 - **Failure log.** Every fail-open catch in the three hooks, plus `memory_search`'s total-failure path, appends one line to a local log file: ISO timestamp, component (for example `sessionStart.timeout`, `userPromptSubmit.error`, `sessionEnd`, `memorySearch`), and the error's name only, never its message (driver messages can embed connection details). The file lives at `$MEMORY_FAILURE_LOG`, defaulting to `~/.mongo-claude-memory/failures.log`. If memory seems inert, read this file first.
-- **`--doctor`.** `node dist/consolidation/cli.js --doctor` runs an end-to-end connectivity self-check: connects, writes a canary observation to project `doctor:canary` (normal priority, so the observation TTL cleans up any leftovers), reads it back, deletes it, and times a `brief:global` fetch against the `SESSION_START_TIMEOUT_MS` budget. It prints each step's latency and pass/fail and exits non-zero when any step fails. It never prints connection strings.
+- **`--doctor`.** `node dist/consolidation/cli.js --doctor` runs an end-to-end connectivity self-check: connects, writes a canary observation to project `doctor:canary` (normal priority, so the observation TTL cleans up any leftovers), reads it back, deletes it, and times a `brief:global` fetch against the `SESSION_START_TIMEOUT_MS` budget. It prints each step's latency and pass/fail and exits non-zero when any step fails. It never prints connection strings. It also verifies that the Atlas Search indexes required by the configured embedding mode exist and are queryable, since a missing or still-building index makes `$vectorSearch` return empty rather than error.
+- **Failed observations.** The extraction batch budget (`CONSOLIDATION_BATCH_MAX_CHARS`) is model-aware, so a batch is normally sized to fit the configured model's context window. If a batch still fails extraction non-retryably (for example, output truncated by the model's max-token limit, or a single observation genuinely too large for the model's context), it is split in half and retried, isolating the single observation actually responsible. If that isolated observation still fails, it is marked with a terminal `failed` status (its error name recorded as `failure_reason`, never the error message) so it is never retried again; everything else in the original batch is still processed normally. `--status` reports the count as "Failed observations (terminal, will not retry)".
+- **Circuit breaker.** A single poisonous observation is one thing; a dead API key or an exhausted quota is another, and it looks identical at the per-observation level: every extraction call fails non-retryably. `CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES` (default 3) caps how many single-observation terminal failures a run marks in a row before it stops assuming isolated bad observations and instead aborts on the assumption of a global provider problem, the same way an unhandled transient failure does: the lease is released and the remaining, still-claimed observations are left for the stale-claim sweep to reclaim rather than being branded failed one at a time. A successful extraction anywhere in the run resets the counter, so a genuinely bad observation or two scattered among healthy ones never trips it. The aborted run's log line names the count and the last failure's error name. Observations already marked failed before the breaker trips stay failed; recover them with `--retry-failed` below once the provider issue is fixed.
+- **`--retry-failed <project>`.** Resets every `"failed"` observation in a project back to `"pending"`, clearing `failed_at`, `failure_reason`, `run_id`, and `claimed_at`, so the next consolidation run picks them up as if they had never been claimed. Requires no LLM credentials (it is a plain update), so it works even while the outage that caused the failures is still unresolved. Zero matches is a normal outcome, printed plainly, not an error: `node dist/consolidation/cli.js --retry-failed mongo-claude-memory`.
+- **Quarantined candidates.** A candidate fact rejected by the deterministic deny-list validator or the LLM injection classifier during consolidation is stored in full, not just an 80-character stderr line, in the `dropped_candidates` collection, with its stage, reason, and provenance, TTL-bounded by `DROPPED_CANDIDATE_TTL_DAYS` (default 30 days). `--status` reports quarantined counts by project and stage. A false-positive drop is recoverable within the TTL window: inspect the collection by hand and re-add the fact via `memory_write` or `/remember`.
+
+### Offline brief cache
+
+`SessionStart` writes the last successfully fetched brief pair to a local file (`~/.mongo-claude-memory/brief-cache/<project>.json`, mode `0600`, capped at 256 KiB) every time a live fetch completes with content. That local cache is served only when the live fetch times out or errors, never on a healthy fetch that legitimately returns nothing, so a deliberate `memory_forget` on an otherwise-empty project is never mistaken for an outage. A cached brief is always prefixed with a notice stating it was served from cache, how old it is, and that it may be stale or contain since-forgotten items.
+
+`memory_forget` deletes the local cache file for its project immediately, on the machine it ran on, so a tombstoned belief is never re-served from that machine's cache. On a different machine, forgotten content can still be served from a stale local cache for up to `BRIEF_CACHE_MAX_AGE_DAYS` (default 7 days), and only while Atlas itself is unreachable from that machine; as soon as Atlas is reachable again, the live, tombstone-respecting fetch takes over. This tradeoff (a small, bounded window where a different machine can serve forgotten content, in exchange for a session never starting memoryless during a brief outage) is deliberate. Set `BRIEF_CACHE_MAX_AGE_DAYS=0` to disable the cache entirely: the file may still be written, but it is never read back.
+
+**A documented boundary of `memory_forget`'s scope.** `memory_forget` only reaches the engine's own beliefs, briefs, and brief cache. Claude Code's native auto memory (the `MEMORY.md` index and topic files) is a separate store that Claude can write to on its own, at any time, and `memory_forget` has no access to it. In a configuration running the engine alongside native auto memory, a fact just tombstoned by `memory_forget` can still surface from that native store until it is removed there directly.
 
 ---
 
@@ -522,4 +567,12 @@ npm run consolidate    # run the consolidator CLI
 npm run mcp            # start the MCP server (stdio)
 ```
 
-The test suite (265 tests across the hooks, capture, consolidation, embeddings, MCP tools, and CLI modules) is fully mocked: no live Atlas cluster, Voyage key, or Anthropic/AWS credentials are needed to develop or run it. Live Atlas/Voyage behavior (hybrid search, `autoEmbed`, native `$rerank`, degradation paths) should be verified against a real cluster before relying on it in production, since Atlas capabilities move faster than any fixed test fixture.
+The test suite (541 tests across the hooks, capture, consolidation, embeddings, MCP tools, and CLI modules) is fully mocked: no live Atlas cluster, Voyage key, or Anthropic/AWS credentials are needed to develop or run it. Live Atlas/Voyage behavior (hybrid search, `autoEmbed`, native `$rerank`, degradation paths) should be verified against a real cluster before relying on it in production, since Atlas capabilities move faster than any fixed test fixture.
+
+---
+
+## Benchmarking (the memory gauntlet)
+
+`demo/gauntlet/` holds a reproducible recall benchmark comparing this engine against Claude Code's native memory and against a memoryless baseline, across four isolated arms: `control` (never seeded, a guessability baseline), `stock` (native memory alone), `engine` (this engine alone, with native memory quarantined), and `engine-native` (both together, the realistic configuration most users run). The pipeline seeds a fixed fact corpus into headless sessions, consolidates it, asks recall questions in fresh sessions, and grades the answers by word-boundary keyword matching, cross-checked by a blinded LLM judge (`judge.mjs`) whose disagreements are reviewed by a human before being merged into the final grade.
+
+Benchmark facts and results (`facts.json`, `REPORT.md`, adjudications, run state) are gitignored and local-only: a fresh clone needs `facts.json` supplied by the maintainer before any gauntlet script can run. See `demo/gauntlet/README.md` for the full run order, arm semantics, and integrity guarantees.

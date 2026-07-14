@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Config } from "../src/config.js";
 
 const loadConfig = vi.fn();
 const getDb = vi.fn();
@@ -7,6 +8,7 @@ const embed = vi.fn();
 const runConsolidation = vi.fn();
 const fetchExistingBeliefs = vi.fn();
 const markConsolidated = vi.fn();
+const markObservationFailed = vi.fn();
 const reclaimStale = vi.fn();
 const claimBatch = vi.fn();
 const acquireLease = vi.fn();
@@ -20,6 +22,8 @@ const formatDryRunReport = vi.fn(() => "dry-run-report");
 const defaultDryRunDeps = vi.fn(() => ({}) as any);
 const runRollback = vi.fn();
 const formatRollbackReport = vi.fn(() => "rollback-report");
+const runReconcileSweep = vi.fn();
+const formatReconcileReport = vi.fn(() => "reconcile-report");
 const getStatusReport = vi.fn();
 const formatStatusReport = vi.fn(() => "status-report");
 
@@ -30,6 +34,7 @@ vi.mock("../src/consolidation/run.js", () => ({
   runConsolidation,
   fetchExistingBeliefs,
   markConsolidated,
+  markObservationFailed,
 }));
 vi.mock("../src/consolidation/claim.js", () => ({ reclaimStale, claimBatch }));
 vi.mock("../src/consolidation/lock.js", () => ({ acquireLease, renewLease, releaseLease }));
@@ -42,9 +47,13 @@ vi.mock("../src/consolidation/dryRun.js", () => ({
   defaultDryRunDeps,
 }));
 vi.mock("../src/consolidation/rollback.js", () => ({ runRollback, formatRollbackReport }));
+vi.mock("../src/consolidation/reconcileSweep.js", () => ({ runReconcileSweep, formatReconcileReport }));
 vi.mock("../src/consolidation/status.js", () => ({ getStatusReport, formatStatusReport }));
 
-const { main, runDoctor, findPendingProjects } = await import("../src/consolidation/cli.js");
+const { main, runDoctor, findPendingProjects, resolveBatchMaxChars } = await import(
+  "../src/consolidation/cli.js"
+);
+const { computeBatchMaxCharsDefault } = await import("../src/llm/contextWindow.js");
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -64,12 +73,16 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     anthropicModel: "claude-sonnet-5",
     llmProvider: "anthropic",
     llmTimeoutMs: 60000,
+    ollamaContextTokens: 8192,
     leaseMs: 300000,
     claimBatchSize: 50,
     consolidationBatchMaxChars: 300000,
     reclaimAfterMs: 600000,
     beliefsContextLimit: 30,
     dedupeSimilarityThreshold: 0.93,
+    reconcileSimilarityThreshold: 0.75,
+    reconcileMaxPairs: 25,
+    embeddingMode: "appside",
     ...overrides,
   };
 }
@@ -342,6 +355,143 @@ describe("main (--rollback subcommand)", () => {
   });
 });
 
+describe("main (--reconcile subcommand)", () => {
+  it("dispatches to runReconcileSweep with the project positional, wires deps from config, and prints the formatted report", async () => {
+    loadConfig.mockReturnValue(
+      makeConfig({
+        reconcileSimilarityThreshold: 0.8,
+        reconcileMaxPairs: 10,
+        embeddingMode: "appside",
+        voyageModel: "voyage-4",
+      })
+    );
+    const db = {};
+    getDb.mockResolvedValue(db);
+    runReconcileSweep.mockResolvedValue({
+      beliefsScanned: 0,
+      pairsFound: 0,
+      pairsArbitrated: 0,
+      archivedSupersedes: [],
+      archivedDuplicates: [],
+      skippedCap: 0,
+      skippedContention: 0,
+      skippedErrors: 0,
+      recompiledScopes: [],
+    });
+
+    setArgs("--reconcile", "my-project");
+    await main();
+
+    expect(runReconcileSweep).toHaveBeenCalledTimes(1);
+    const [calledDb, calledProject, calledDeps] = runReconcileSweep.mock.calls[0];
+    expect(calledDb).toBe(db);
+    expect(calledProject).toBe("my-project");
+    expect(calledDeps.threshold).toBe(0.8);
+    expect(calledDeps.maxPairs).toBe(10);
+    expect(calledDeps.embeddingMode).toBe("appside");
+    expect(typeof calledDeps.reconcile).toBe("function");
+    expect(typeof calledDeps.compileBrief).toBe("function");
+    expect(formatReconcileReport).toHaveBeenCalledWith("my-project", expect.any(Object));
+    expect(logSpy).toHaveBeenCalledWith("reconcile-report");
+  });
+
+  it("errors and sets a non-zero exit code, without calling runReconcileSweep or getDb, when no project is given", async () => {
+    loadConfig.mockReturnValue(makeConfig());
+
+    setArgs("--reconcile");
+    await main();
+
+    expect(getDb).not.toHaveBeenCalled();
+    expect(runReconcileSweep).not.toHaveBeenCalled();
+    expect(formatReconcileReport).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("is gated behind the ANTHROPIC_API_KEY guard (unlike --status/--rollback/--doctor): skips cleanly, never reaching the sweep, when the key is missing", async () => {
+    loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+
+    setArgs("--reconcile", "my-project");
+    await main();
+
+    expect(getDb).not.toHaveBeenCalled();
+    expect(runReconcileSweep).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
+describe("main (--retry-failed subcommand)", () => {
+  function makeRetryFailedDb(modifiedCount: number) {
+    const updateMany = vi.fn(async () => ({
+      acknowledged: true,
+      matchedCount: modifiedCount,
+      modifiedCount,
+    }));
+    const collectionFn = vi.fn(() => ({ updateMany }));
+    const db = { collection: collectionFn };
+    return { db, updateMany, collectionFn };
+  }
+
+  it("errors and sets a non-zero exit code, without touching the DB, when no project is given", async () => {
+    loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+
+    setArgs("--retry-failed");
+    await main();
+
+    expect(getDb).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("issues the exact updateMany filter/update shape against the observations collection and prints the reset count", async () => {
+    loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+    const { db, updateMany, collectionFn } = makeRetryFailedDb(5);
+    getDb.mockResolvedValue(db);
+
+    setArgs("--retry-failed", "my-project");
+    await main();
+
+    expect(collectionFn).toHaveBeenCalledWith("observations");
+    expect(updateMany).toHaveBeenCalledWith(
+      { project: "my-project", status: "failed" },
+      {
+        $set: { status: "pending" },
+        $unset: { failed_at: "", failure_reason: "", run_id: "", claimed_at: "" },
+      }
+    );
+    const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("reset 5 failed observation");
+    expect(printed).toContain("my-project");
+    expect(runConsolidation).not.toHaveBeenCalled();
+  });
+
+  it("prints the normal zero-match message, not an error, when there are no failed observations to retry", async () => {
+    loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+    const { db } = makeRetryFailedDb(0);
+    getDb.mockResolvedValue(db);
+
+    setArgs("--retry-failed", "my-project");
+    await main();
+
+    const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("no failed observations to retry");
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("does not require ANTHROPIC_API_KEY: works the same during the outage that caused the failures being retried", async () => {
+    loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));
+    const { db, updateMany } = makeRetryFailedDb(1);
+    getDb.mockResolvedValue(db);
+
+    setArgs("--retry-failed", "my-project");
+    await main();
+
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("findPendingProjects", () => {
   it("unions projects with pending observations and projects with stale claimed observations", async () => {
     const distinct = vi.fn(async (_field: string, filter: Record<string, unknown>) => {
@@ -367,7 +517,16 @@ describe("findPendingProjects", () => {
 });
 
 describe("runDoctor (--doctor)", () => {
-  function makeDoctorDb(opts: { canaryFound?: boolean } = {}) {
+  type SearchIndexesSpec = Array<{ name: string; queryable: boolean }> | "throw";
+
+  const defaultSearchIndexes: SearchIndexesSpec = [
+    { name: "beliefs_vec", queryable: true },
+    { name: "beliefs_text", queryable: true },
+  ];
+
+  function makeDoctorDb(
+    opts: { canaryFound?: boolean; searchIndexes?: SearchIndexesSpec } = {}
+  ) {
     let insertedDoc: Record<string, unknown> | null = null;
     const observationsCollection = {
       insertOne: vi.fn(async (doc: Record<string, unknown>) => {
@@ -382,22 +541,40 @@ describe("runDoctor (--doctor)", () => {
     const briefsCollection = {
       findOne: vi.fn(async () => null), // no brief:global yet is still a PASS
     };
+    const searchIndexesSpec = opts.searchIndexes ?? defaultSearchIndexes;
+    const aggregate = vi.fn(() => ({
+      toArray: async () => {
+        if (searchIndexesSpec === "throw") {
+          throw new Error("no $listSearchIndexes support on this cluster");
+        }
+        return searchIndexesSpec;
+      },
+    }));
+    const beliefsCollection = { aggregate };
     const db = {
-      collection: vi.fn((name: string) =>
-        name === "observations" ? observationsCollection : briefsCollection
-      ),
+      collection: vi.fn((name: string) => {
+        if (name === "observations") return observationsCollection;
+        if (name === "beliefs") return beliefsCollection;
+        return briefsCollection;
+      }),
     };
-    return { db, observationsCollection, briefsCollection, getInserted: () => insertedDoc };
+    return {
+      db,
+      observationsCollection,
+      briefsCollection,
+      beliefsCollection,
+      getInserted: () => insertedDoc,
+    };
   }
 
-  it("happy path: writes, reads back, and deletes a canary, times the brief fetch, and reports all steps passing", async () => {
+  it("happy path: writes, reads back, and deletes a canary, times the brief fetch, checks search indexes, and reports all steps passing", async () => {
     loadConfig.mockReturnValue(makeConfig());
     const { db, observationsCollection, briefsCollection, getInserted } = makeDoctorDb();
 
-    const report = await runDoctor(db as any, 3000);
+    const report = await runDoctor(db as any, 3000, "appside");
 
     expect(report.ok).toBe(true);
-    expect(report.steps).toHaveLength(4);
+    expect(report.steps).toHaveLength(5);
     expect(report.steps.every((s: { ok: boolean }) => s.ok)).toBe(true);
     expect(report.steps.every((s: { ms: number }) => typeof s.ms === "number")).toBe(true);
 
@@ -408,13 +585,18 @@ describe("runDoctor (--doctor)", () => {
     expect(inserted.priority).toBe("normal");
     expect(observationsCollection.deleteOne).toHaveBeenCalledWith({ _id: "canary-id" });
     expect(briefsCollection.findOne).toHaveBeenCalledWith({ _id: "brief:global" });
+
+    const searchStep = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+    expect(searchStep.ok).toBe(true);
+    expect(searchStep.detail).toContain("beliefs_vec");
+    expect(searchStep.detail).toContain("beliefs_text");
   });
 
   it("reports a failed step (and ok:false) when the canary cannot be read back, using the error name only", async () => {
     loadConfig.mockReturnValue(makeConfig());
     const { db } = makeDoctorDb({ canaryFound: false });
 
-    const report = await runDoctor(db as any, 3000);
+    const report = await runDoctor(db as any, 3000, "appside");
 
     expect(report.ok).toBe(false);
     const readStep = report.steps.find((s: { name: string }) => s.name === "read canary back")!;
@@ -436,5 +618,178 @@ describe("runDoctor (--doctor)", () => {
     expect(printed).toContain("all steps passed");
     expect(printed).not.toContain("mongodb://"); // never a connection string
     expect(runConsolidation).not.toHaveBeenCalled();
+  });
+
+  describe("search indexes step", () => {
+    it("passes (and doctor is overall ok) when the required indexes are present and queryable", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [
+          { name: "beliefs_vec", queryable: true },
+          { name: "beliefs_text", queryable: true },
+        ],
+      });
+
+      const report = await runDoctor(db as any, 3000, "appside");
+
+      expect(report.ok).toBe(true);
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(true);
+    });
+
+    it("fails the step, and the overall doctor result, when the required vector index is missing, and includes the setupIndexes.js hint", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [{ name: "beliefs_text", queryable: true }],
+      });
+
+      const report = await runDoctor(db as any, 3000, "appside");
+
+      expect(report.ok).toBe(false);
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(false);
+      expect(step.detail).toContain("beliefs_vec");
+      expect(step.detail).toContain("MISSING");
+      expect(step.detail).toContain("setupIndexes.js");
+    });
+
+    it("fails the step when a required index is present but not queryable", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [
+          { name: "beliefs_vec", queryable: false },
+          { name: "beliefs_text", queryable: true },
+        ],
+      });
+
+      const report = await runDoctor(db as any, 3000, "appside");
+
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(false);
+      expect(report.ok).toBe(false);
+      expect(step.detail).toContain("beliefs_vec");
+    });
+
+    it("in auto mode requires beliefs_vec_auto: a mock with only beliefs_vec (appside's index) fails", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [
+          { name: "beliefs_vec", queryable: true },
+          { name: "beliefs_text", queryable: true },
+        ],
+      });
+
+      const report = await runDoctor(db as any, 3000, "auto");
+
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(false);
+      expect(step.detail).toContain("beliefs_vec_auto");
+      expect(step.detail).toContain("MISSING");
+    });
+
+    it("in appside mode requires beliefs_vec: a mock with only beliefs_vec_auto (auto's index) fails", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [
+          { name: "beliefs_vec_auto", queryable: true },
+          { name: "beliefs_text", queryable: true },
+        ],
+      });
+
+      const report = await runDoctor(db as any, 3000, "appside");
+
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(false);
+      expect(step.detail).toContain("beliefs_vec: MISSING");
+    });
+
+    it("passes in auto mode when beliefs_vec_auto and beliefs_text are present and queryable", async () => {
+      const { db } = makeDoctorDb({
+        searchIndexes: [
+          { name: "beliefs_vec_auto", queryable: true },
+          { name: "beliefs_text", queryable: true },
+        ],
+      });
+
+      const report = await runDoctor(db as any, 3000, "auto");
+
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(true);
+      expect(report.ok).toBe(true);
+    });
+
+    it("fails soft with the error NAME when $listSearchIndexes throws (older cluster, no search support), leaving other steps unaffected", async () => {
+      const { db } = makeDoctorDb({ searchIndexes: "throw" });
+
+      const report = await runDoctor(db as any, 3000, "appside");
+
+      expect(report.ok).toBe(false);
+      const step = report.steps.find((s: { name: string }) => s.name === "search indexes")!;
+      expect(step.ok).toBe(false);
+      expect(step.detail).toContain("Error"); // error NAME only, never err.message
+      expect(step.detail).not.toContain("no $listSearchIndexes support on this cluster"); // never the raw message
+      expect(step.detail).toContain("unavailable");
+
+      // Every other doctor step still ran and passed; this step's failure is isolated.
+      const otherSteps = report.steps.filter((s: { name: string }) => s.name !== "search indexes");
+      expect(otherSteps.every((s: { ok: boolean }) => s.ok)).toBe(true);
+    });
+  });
+});
+
+describe("resolveBatchMaxChars", () => {
+  it("an explicit consolidationBatchMaxChars always wins over the model-aware default", () => {
+    const config = makeConfig({
+      llmProvider: "ollama",
+      ollamaContextTokens: 8192,
+      consolidationBatchMaxChars: 12345,
+    }) as unknown as Config;
+
+    expect(resolveBatchMaxChars(config)).toBe(12345);
+  });
+
+  it("falls back to the real model-aware default (computeBatchMaxCharsDefault) when unset", () => {
+    const config = makeConfig({
+      llmProvider: "ollama",
+      ollamaContextTokens: 8192,
+      consolidationBatchMaxChars: undefined,
+    }) as unknown as Config;
+
+    // 8192 tokens * 4 chars/token * 0.6 safety margin, floored: 19660.
+    expect(resolveBatchMaxChars(config)).toBe(19660);
+    expect(resolveBatchMaxChars(config)).toBe(computeBatchMaxCharsDefault(config));
+  });
+});
+
+describe("main: extraction batch budget warning", () => {
+  it("logs a warning when the resolved batch budget is smaller than a single observation can be", async () => {
+    loadConfig.mockReturnValue(
+      makeConfig({
+        llmProvider: "ollama",
+        anthropicApiKey: undefined,
+        ollamaContextTokens: 8192,
+        consolidationBatchMaxChars: undefined,
+      })
+    );
+    const { db } = makeFakeDb();
+    getDb.mockResolvedValue(db);
+    runConsolidation.mockResolvedValue({ processed: 0, skipped: false });
+
+    setArgs("my-project");
+    await main();
+
+    const logged = errorSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("extraction batch budget");
+    expect(logged).toContain("19660 chars");
+  });
+
+  it("logs no warning when the resolved batch budget is at or above a single observation's max size", async () => {
+    loadConfig.mockReturnValue(
+      makeConfig({ consolidationBatchMaxChars: undefined }) // anthropic default: 200k-token model, well over 50000 chars
+    );
+    const { db } = makeFakeDb();
+    getDb.mockResolvedValue(db);
+    runConsolidation.mockResolvedValue({ processed: 0, skipped: false });
+
+    setArgs("my-project");
+    await main();
+
+    const logged = errorSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).not.toContain("extraction batch budget");
   });
 });

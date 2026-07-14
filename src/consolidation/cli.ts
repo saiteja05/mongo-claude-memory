@@ -5,10 +5,10 @@ import type { Db } from "mongodb";
 import { loadConfig } from "../config.js";
 import type { Config } from "../config.js";
 import { getDb, closeDb } from "../db/client.js";
-import { OBSERVATIONS, BRIEFS } from "../db/schema.js";
+import { OBSERVATIONS, BRIEFS, BELIEFS } from "../db/schema.js";
 import { embed } from "../embeddings/voyage.js";
 import { writeObservation } from "../capture/writeObservation.js";
-import { runConsolidation, fetchExistingBeliefs, markConsolidated } from "./run.js";
+import { runConsolidation, fetchExistingBeliefs, markConsolidated, markObservationFailed } from "./run.js";
 import type { RunConsolidationDeps } from "./run.js";
 import { reclaimStale, claimBatch } from "./claim.js";
 import { acquireLease, renewLease, releaseLease } from "./lock.js";
@@ -19,7 +19,11 @@ import { reconcileCandidate } from "./reconcileBelief.js";
 import { compileBrief } from "./compileBrief.js";
 import { runConsolidationDryRun, formatDryRunReport, defaultDryRunDeps } from "./dryRun.js";
 import { runRollback, formatRollbackReport } from "./rollback.js";
+import { runReconcileSweep, formatReconcileReport } from "./reconcileSweep.js";
+import type { ReconcileSweepDeps } from "./reconcileSweep.js";
 import { getStatusReport, formatStatusReport } from "./status.js";
+import { computeBatchMaxCharsDefault, getContextWindowTokens } from "../llm/contextWindow.js";
+import { MAX_OBSERVATION_TEXT_LENGTH } from "../capture/constants.js";
 
 /**
  * cli.ts, the cron/Atlas-Trigger entry point (dist/consolidation/cli.js). Not
@@ -47,15 +51,28 @@ export async function findPendingProjects(db: Db, reclaimAfterMs: number): Promi
   return Array.from(new Set([...(pending as string[]), ...(stale as string[])]));
 }
 
+/**
+ * Resolves the extraction batch's character budget: an explicit
+ * CONSOLIDATION_BATCH_MAX_CHARS always wins (config.consolidationBatchMaxChars
+ * is only defined when that env var was set to a valid number), otherwise
+ * falls back to a model-aware default sized to the configured consolidation
+ * model's context window (llm/contextWindow.ts), instead of one fixed
+ * constant regardless of provider.
+ */
+export function resolveBatchMaxChars(config: Config): number {
+  return config.consolidationBatchMaxChars ?? computeBatchMaxCharsDefault(config);
+}
+
 function buildDeps(config: Config, runId: string): RunConsolidationDeps {
   return {
     runId,
     leaseMs: config.leaseMs,
     claimBatchSize: config.claimBatchSize,
-    consolidationBatchMaxChars: config.consolidationBatchMaxChars,
+    consolidationBatchMaxChars: resolveBatchMaxChars(config),
     reclaimAfterMs: config.reclaimAfterMs,
     beliefsContextLimit: config.beliefsContextLimit,
     dedupeSimilarityThreshold: config.dedupeSimilarityThreshold,
+    maxConsecutiveTerminalExtractionFailures: config.maxConsecutiveTerminalExtractionFailures,
     embeddingMode: config.embeddingMode,
     reclaimStale,
     acquireLease,
@@ -82,6 +99,23 @@ function buildDeps(config: Config, runId: string): RunConsolidationDeps {
       ),
     compileBrief,
     markConsolidated,
+    markFailed: markObservationFailed,
+  };
+}
+
+// Wires --reconcile's deps from config the same way buildDeps wires
+// upsertBelief's write-time reconciliation options: reconcileMaxPairs caps
+// how many LLM arbitration calls one sweep can make, embeddingMode/voyageModel
+// are the same fields buildDeps already passes through as upsertBelief's
+// EmbeddingModeOptions.
+function buildReconcileDeps(config: Config): ReconcileSweepDeps {
+  return {
+    threshold: config.reconcileSimilarityThreshold,
+    maxPairs: config.reconcileMaxPairs,
+    embeddingMode: config.embeddingMode,
+    model: config.voyageModel,
+    reconcile: reconcileCandidate,
+    compileBrief,
   };
 }
 
@@ -97,15 +131,46 @@ export interface DoctorReport {
   steps: DoctorStep[];
 }
 
+// Search index names the doctor's "search indexes" step checks for. These
+// must match setupIndexes.ts's index names and upsertBelief.ts's
+// BELIEFS_VECTOR_INDEX / BELIEFS_VECTOR_INDEX_AUTO constants exactly (kept as
+// separate literals here, the same way upsertBelief.ts duplicates rather than
+// imports setupIndexes.ts's names, since this file only reads them for a
+// self-check and does not otherwise depend on those modules).
+const BELIEFS_VECTOR_INDEX_APPSIDE = "beliefs_vec";
+const BELIEFS_VECTOR_INDEX_AUTO = "beliefs_vec_auto";
+const BELIEFS_TEXT_INDEX = "beliefs_text";
+
+// A doctor step's own hand-authored failure detail (never derived from a
+// driver/provider error's message, which can embed a connection string).
+// step()'s catch handler below special-cases this type so it can safely
+// surface the full message instead of falling back to the error NAME only,
+// without weakening the "never print raw driver error messages" rule for
+// every other step, which still only ever sees err.name.
+class DoctorCheckFailure extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DoctorCheckFailure";
+  }
+}
+
 /**
  * --doctor: end-to-end connectivity self-check for diagnosing silent
  * failures. Writes a canary observation to project "doctor:canary" (normal
  * priority, so the observation TTL cleans up any leftovers), reads it back,
- * deletes it, and times a brief:global fetch against the SessionStart
- * budget. Reports each step's latency and pass/fail; never prints connection
- * strings or raw driver error messages (error NAME only).
+ * deletes it, times a brief:global fetch against the SessionStart budget,
+ * and verifies the Atlas search indexes the configured embedding mode
+ * requires actually exist and are queryable (a missing vector index makes
+ * $vectorSearch return empty results instead of erroring, silently
+ * disabling vector dedupe, memory_search, and reconciliation). Reports each
+ * step's latency and pass/fail; never prints connection strings or raw
+ * driver error messages (error NAME only).
  */
-export async function runDoctor(db: Db, sessionStartTimeoutMs: number): Promise<DoctorReport> {
+export async function runDoctor(
+  db: Db,
+  sessionStartTimeoutMs: number,
+  embeddingMode: Config["embeddingMode"] = "appside"
+): Promise<DoctorReport> {
   const steps: DoctorStep[] = [];
 
   async function step(name: string, fn: () => Promise<string | undefined>): Promise<boolean> {
@@ -115,12 +180,13 @@ export async function runDoctor(db: Db, sessionStartTimeoutMs: number): Promise<
       steps.push({ name, ok: true, ms: Date.now() - startedAt, detail });
       return true;
     } catch (err) {
-      steps.push({
-        name,
-        ok: false,
-        ms: Date.now() - startedAt,
-        detail: err instanceof Error ? err.name : "unknown error",
-      });
+      const detail =
+        err instanceof DoctorCheckFailure
+          ? err.message
+          : err instanceof Error
+            ? err.name
+            : "unknown error";
+      steps.push({ name, ok: false, ms: Date.now() - startedAt, detail });
       return false;
     }
   }
@@ -162,6 +228,57 @@ export async function runDoctor(db: Db, sessionStartTimeoutMs: number): Promise<
     return doc ? `found (${elapsed}ms)` : `no brief:global document yet (${elapsed}ms)`;
   });
 
+  await step("search indexes", async () => {
+    const requiredVectorIndex =
+      embeddingMode === "auto" ? BELIEFS_VECTOR_INDEX_AUTO : BELIEFS_VECTOR_INDEX_APPSIDE;
+    const requiredNames = [requiredVectorIndex, BELIEFS_TEXT_INDEX];
+
+    let indexDocs: Array<Record<string, unknown>>;
+    try {
+      indexDocs = await db
+        .collection(BELIEFS)
+        .aggregate([{ $listSearchIndexes: {} }])
+        .toArray();
+    } catch (err) {
+      // Older clusters (no mongot / Atlas Search support) throw here rather
+      // than returning an empty list. Fail this step soft with the error
+      // NAME only (never err.message, which can embed a connection string)
+      // plus a static, hand-authored note; every other doctor step above and
+      // below runs independently and is unaffected either way.
+      const name = err instanceof Error ? err.name : "unknown error";
+      throw new DoctorCheckFailure(
+        `${name}: search-index verification is unavailable on this cluster (no $listSearchIndexes support).`
+      );
+    }
+
+    const queryableByName = new Map<string, boolean>();
+    for (const doc of indexDocs) {
+      if (typeof doc.name === "string") {
+        queryableByName.set(doc.name, doc.queryable === true);
+      }
+    }
+
+    const results = requiredNames.map((name) => ({
+      name,
+      found: queryableByName.has(name),
+      queryable: queryableByName.get(name) === true,
+    }));
+
+    const summary = results
+      .map((r) => `${r.name}: ${r.found ? `found, queryable=${r.queryable}` : "MISSING"}`)
+      .join(", ");
+
+    if (results.every((r) => r.found && r.queryable)) {
+      return summary;
+    }
+
+    throw new DoctorCheckFailure(
+      `${summary} -- run node dist/db/setupIndexes.js to create the missing search index(es). ` +
+        "A missing vector index makes $vectorSearch return empty instead of erroring, so vector " +
+        "dedupe, memory_search, and reconciliation silently degrade."
+    );
+  });
+
   return { ok: steps.every((s) => s.ok), steps };
 }
 
@@ -187,6 +304,44 @@ function parseRollbackRunId(args: string[]): string | undefined {
     return args[flagIndex + 1];
   }
   return args.find((arg) => arg !== "--rollback" && !arg.startsWith("--"));
+}
+
+// Parses the project positional for the "--reconcile" operator flag: the
+// first remaining arg that is not itself a "--" flag (and not "--reconcile"
+// itself), the same bare-positional convention parseRollbackRunId falls back
+// to for "--rollback".
+function parseReconcileProject(args: string[]): string | undefined {
+  return args.find((arg) => arg !== "--reconcile" && !arg.startsWith("--"));
+}
+
+// Parses the project positional for the "--retry-failed" operator flag: the
+// first remaining arg that is not itself a "--" flag (and not "--retry-failed"
+// itself), the same bare-positional convention parseReconcileProject uses.
+// Required, refused the same way --rollback refuses a missing run id: there
+// is no sane default project to reset "failed" observations for.
+function parseRetryFailedProject(args: string[]): string | undefined {
+  return args.find((arg) => arg !== "--retry-failed" && !arg.startsWith("--"));
+}
+
+/**
+ * --retry-failed <project>: undoes markObservationFailed / the circuit
+ * breaker's terminal path by resetting every "failed" observation in the
+ * named project back to "pending" and clearing the fields that failure (and
+ * the claim it happened under) set, so the next consolidation run picks them
+ * up as if they had never been claimed. This is the only operator path that
+ * can un-fail an observation; before it existed, recovering from a bad batch
+ * of terminal failures required a hand-written Mongo update. Zero matches
+ * (nothing was "failed" for this project) is a normal outcome, not an error.
+ */
+export async function runRetryFailed(db: Db, project: string): Promise<number> {
+  const result = await db.collection(OBSERVATIONS).updateMany(
+    { project, status: "failed" },
+    {
+      $set: { status: "pending" },
+      $unset: { failed_at: "", failure_reason: "", run_id: "", claimed_at: "" },
+    }
+  );
+  return result.modifiedCount;
 }
 
 export async function main(): Promise<void> {
@@ -240,10 +395,39 @@ export async function main(): Promise<void> {
 
     if (args.includes("--doctor")) {
       const db = await getDb();
-      const report = await runDoctor(db, config.sessionStartTimeoutMs);
+      const report = await runDoctor(db, config.sessionStartTimeoutMs, config.embeddingMode);
       console.log(formatDoctorReport(report));
       if (!report.ok) {
         process.exitCode = 1;
+      }
+      return;
+    }
+
+    // "--retry-failed" is also a read/operator-adjacent subcommand placed
+    // alongside --status/--rollback/--doctor, not gated behind the
+    // ANTHROPIC_API_KEY check below: it only issues a plain updateMany, no
+    // LLM call, so it must keep working even when the very provider outage
+    // that caused the failures it is recovering from is still unresolved.
+    if (args.includes("--retry-failed")) {
+      const retryProject = parseRetryFailedProject(args);
+      if (!retryProject) {
+        console.error(
+          "[consolidate] --retry-failed requires a project: pass it as a positional argument."
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const db = await getDb();
+      const resetCount = await runRetryFailed(db, retryProject);
+      if (resetCount === 0) {
+        console.log(
+          `[consolidate] project="${retryProject}": no failed observations to retry.`
+        );
+      } else {
+        console.log(
+          `[consolidate] project="${retryProject}": reset ${resetCount} failed observation(s) to ` +
+            "pending; the next consolidation run will pick them up."
+        );
       }
       return;
     }
@@ -260,10 +444,51 @@ export async function main(): Promise<void> {
       return;
     }
 
+    // "--reconcile" is also an operator subcommand, but unlike --status and
+    // --rollback it does call the LLM (arbitrating each near-duplicate pair
+    // it finds), so it is dispatched after the ANTHROPIC_API_KEY guard above
+    // rather than alongside --status/--rollback/--doctor. The project
+    // positional is required (not optional the way the default consolidation
+    // path's argProject is): a sweep with no project to scope it to has
+    // nothing to do.
+    if (args.includes("--reconcile")) {
+      const reconcileProject = parseReconcileProject(args);
+      if (!reconcileProject) {
+        console.error(
+          "[consolidate] --reconcile requires a project: pass it as a positional argument."
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const db = await getDb();
+      const result = await runReconcileSweep(db, reconcileProject, buildReconcileDeps(config));
+      console.log(formatReconcileReport(reconcileProject, result));
+      return;
+    }
+
     const dryRun = args.includes("--dry-run");
     const argProject = args.find((arg) => !arg.startsWith("--"));
 
     const db = await getDb();
+
+    // Warn (never block the run on it) when the resolved extraction batch
+    // budget is smaller than a single observation can be
+    // (MAX_OBSERVATION_TEXT_LENGTH): every claimed batch would then risk
+    // containing an observation larger than the model can extract from in
+    // one call. On Anthropic/Bedrock that surfaces as the terminal
+    // single-observation "failed" path once split-retry isolates it; Ollama
+    // instead silently truncates its own context (num_ctx), so this is the
+    // only signal an operator gets for that provider that the configured
+    // model's context is undersized for the observations being captured.
+    const resolvedBatchMaxChars = resolveBatchMaxChars(config);
+    if (resolvedBatchMaxChars < MAX_OBSERVATION_TEXT_LENGTH) {
+      console.error(
+        `[consolidate] warning: extraction batch budget (${resolvedBatchMaxChars} chars, from ` +
+          `${getContextWindowTokens(config)} configured context tokens) is smaller than a single ` +
+          `observation can be (${MAX_OBSERVATION_TEXT_LENGTH} chars); large observations may fail ` +
+          "extraction or be silently truncated depending on the configured provider."
+      );
+    }
 
     const projects = argProject
       ? [argProject]

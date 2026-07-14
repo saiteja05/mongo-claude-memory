@@ -6,6 +6,9 @@ import type { UpsertBeliefResult } from "./upsertBelief.js";
 import { validateCandidateFact } from "./validateFact.js";
 import { classifyInjection as defaultClassifyInjection } from "./classifyInjection.js";
 import type { ClassifyInjectionResult } from "./classifyInjection.js";
+import { isNonRetryableLLMError } from "../llm/errors.js";
+import { appendFailure } from "../telemetry/failureLog.js";
+import { quarantineDroppedCandidate } from "./quarantine.js";
 
 export interface RunConsolidationResult {
   processed: number;
@@ -21,6 +24,16 @@ export interface RunConsolidationDeps {
   reclaimAfterMs: number;
   beliefsContextLimit: number;
   dedupeSimilarityThreshold: number;
+  // Circuit breaker (config.ts's maxConsecutiveTerminalExtractionFailures):
+  // when extractWithSplit isolates and marks failed this many single
+  // observations in a row without a successful extraction in between, the
+  // run aborts on the assumption of a global provider problem (invalid
+  // credentials, quota exhaustion) rather than continuing to mark the rest
+  // of the queue failed one observation at a time. Required, not optional,
+  // like the other run-shape fields above: production callers wire it from
+  // config (buildDeps in cli.ts), tests set it explicitly to control when the
+  // breaker trips.
+  maxConsecutiveTerminalExtractionFailures: number;
   // "auto" (Atlas autoEmbed) skips the embed() call entirely for belief
   // documents, since Atlas computes the embedding server-side from the
   // "text" path. Optional, defaulting to "appside" (current behavior), so
@@ -53,6 +66,15 @@ export interface RunConsolidationDeps {
   // do not set this field still get the real check, while tests must
   // explicitly inject a fake to avoid making a real LLM call.
   classifyInjection?: (text: string) => Promise<ClassifyInjectionResult>;
+  // Quarantines a candidate dropped by validateCandidateFact (stage
+  // "deny-list") or classifyInjection (stage "classifier") so a
+  // false-positive drop is recoverable instead of gone forever. Optional:
+  // when omitted, defaults to the real quarantineDroppedCandidate
+  // (quarantine.ts), which itself never throws (a quarantine failure must
+  // never fail a consolidation run), so production callers that do not set
+  // this field still get the real quarantine, while tests must explicitly
+  // inject a fake to observe it without touching a real db.
+  quarantineDropped?: typeof quarantineDroppedCandidate;
   embed: (texts: string[]) => Promise<number[][]>;
   upsertBelief: (
     db: Db,
@@ -68,6 +90,18 @@ export interface RunConsolidationDeps {
     project: string,
     runId: string,
     observationIds: unknown[]
+  ) => Promise<void>;
+  // Terminal single-observation failure marker, called by extractWithSplit
+  // below once a non-retryable LLM failure has been isolated down to one
+  // observation. Optional so existing callers/tests that omit it still get
+  // the real markObservationFailed; tests that need to observe or stub it
+  // can inject their own.
+  markFailed?: (
+    db: Db,
+    project: string,
+    runId: string,
+    observationId: string,
+    reasonName: string
   ) => Promise<void>;
 }
 
@@ -91,7 +125,12 @@ export async function fetchExistingBeliefs(
   return docs.map((doc) => ({ _id: String(doc._id), text: String(doc.text) }));
 }
 
-/** Default consolidated-marking: only marks observations still owned by this run_id. */
+/**
+ * Default consolidated-marking: only marks observations still owned by this
+ * run_id and still "claimed", so a document extractWithSplit already moved
+ * to "failed" (or one some other run already reset) can never be silently
+ * flipped back to "consolidated" by this call.
+ */
 export async function markConsolidated(
   db: Db,
   project: string,
@@ -99,9 +138,208 @@ export async function markConsolidated(
   observationIds: unknown[]
 ): Promise<void> {
   await db.collection<Observation>(OBSERVATIONS).updateMany(
-    { _id: { $in: observationIds as never[] }, project, run_id: runId },
+    { _id: { $in: observationIds as never[] }, project, run_id: runId, status: "claimed" },
     { $set: { status: "consolidated" } }
   );
+}
+
+/**
+ * Default terminal-failure marking: moves a single observation to "failed"
+ * (excluded from reclaimStale and findPendingProjects, so it is never handed
+ * back for reprocessing), only while it is still owned by this run_id and
+ * still "claimed", mirroring markConsolidated's guard. reasonName must be an
+ * error NAME only (e.g. "NonRetryableLLMError"), never an error message:
+ * provider/driver error messages can embed connection strings or other
+ * secret-bearing detail, and failure_reason is a persisted field.
+ */
+export async function markObservationFailed(
+  db: Db,
+  project: string,
+  runId: string,
+  observationId: string,
+  reasonName: string
+): Promise<void> {
+  await db.collection<Observation>(OBSERVATIONS).updateOne(
+    { _id: observationId as never, project, run_id: runId, status: "claimed" },
+    { $set: { status: "failed", failed_at: new Date(), failure_reason: reasonName } }
+  );
+}
+
+/**
+ * Defense-in-depth wrapper around the (possibly injected) quarantineDropped
+ * dependency: the real quarantineDroppedCandidate already guarantees it
+ * never throws, but an injected dependency (in tests, or a future caller)
+ * might not uphold that contract itself. A quarantine failure must never
+ * fail a consolidation run, so any rejection here is swallowed rather than
+ * propagated.
+ */
+async function quarantineSafely(
+  db: Db,
+  project: string,
+  runId: string,
+  candidate: CandidateFact,
+  stage: "deny-list" | "classifier",
+  reason: string,
+  quarantineDropped: typeof quarantineDroppedCandidate
+): Promise<void> {
+  try {
+    await quarantineDropped(db, project, runId, candidate, stage, reason);
+  } catch {
+    // Swallowed: quarantine is best effort, never allowed to fail the run.
+  }
+}
+
+interface ExtractWithSplitResult {
+  candidates: CandidateFact[];
+  failedIds: string[];
+  leaseLost: boolean;
+}
+
+/**
+ * Mutable, per-run counter of consecutive single-observation terminal
+ * extraction failures, threaded through every recursive extractWithSplit
+ * call for one runConsolidation invocation. Any successful extractFacts call
+ * (at any level: the whole batch or a split half) resets it to 0; only a
+ * leaf (single-observation) non-retryable failure increments it. Plain
+ * mutable object rather than a return value, since extractWithSplit already
+ * returns its own result shape and the counter must survive across sibling
+ * recursive calls (left then right), not just within one call.
+ */
+interface CircuitBreakerState {
+  consecutiveFailures: number;
+}
+
+/**
+ * Thrown when the consecutive-single-observation-failure circuit breaker
+ * trips. Deliberately uncaught anywhere in extractWithSplit's own recursion
+ * (only the deps.extractFacts call itself is wrapped in a try/catch at each
+ * level), so it propagates all the way out of runConsolidation exactly like
+ * an unhandled transient extraction failure does: the existing finally still
+ * releases the lease, and markConsolidated is never reached for the
+ * observations that were still claimed when the breaker tripped, leaving
+ * them for the stale-claim sweep to reclaim rather than branding the rest of
+ * the queue failed one observation at a time. The message is hand-authored
+ * (never a provider error's raw message), so it is safe for cli.ts's
+ * generic run-failed catch to log in full.
+ */
+class ConsolidationCircuitBreakerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConsolidationCircuitBreakerError";
+  }
+}
+
+/**
+ * Split-retry wrapper around deps.extractFacts (P1: a claimed batch that
+ * fails extraction non-retryably, e.g. output truncated by max_tokens, or an
+ * input too large for the model's context, used to be reclaimed by the
+ * stale-claim sweep and re-fail identically forever). On a non-retryable
+ * failure (isNonRetryableLLMError), the batch is bisected and each half
+ * retried on its own, recursively, until the single observation actually
+ * responsible is isolated and marked "failed" via deps.markFailed, letting
+ * every other observation in the original batch still be processed
+ * normally. A transient failure is NOT split: it is rethrown immediately,
+ * exactly as before this change, since dividing the batch does nothing for
+ * a network blip or a rate limit that will recover on its own.
+ *
+ * Renews the lease before every extraction attempt, including this
+ * function's very first (whole-batch) call, not just once per original
+ * batch: each split half is its own LLM call, so a batch that ends up
+ * bisected several times can otherwise still be mid-split after the
+ * original lease's heldUntil has passed. Reports leaseLost immediately
+ * (without attempting extraction) and, for a split, does not attempt the
+ * right half once the left half has already reported it, so a lease lost
+ * mid-split stops the whole subtree rather than continuing to spend calls
+ * under a lease this run no longer holds.
+ *
+ * Worst case O(n) extractFacts calls for n observations (a full binary split
+ * down to n single-observation leaves has n-1 internal nodes, each of which
+ * only re-attempts once before dividing further), not O(n log n): no
+ * subtree is ever retried as a whole after it has already been split once.
+ *
+ * breaker carries the run-scoped consecutive-single-observation-failure
+ * count (see CircuitBreakerState above). A successful extraction, at any
+ * level, resets it to 0; a leaf (single-observation) non-retryable failure
+ * increments it and, once it reaches deps.maxConsecutiveTerminalExtractionFailures,
+ * throws ConsolidationCircuitBreakerError instead of returning normally,
+ * aborting the whole run on the assumption of a global provider problem
+ * (invalid credentials, quota exhaustion) rather than continuing to mark the
+ * rest of the queue failed one observation at a time.
+ */
+async function extractWithSplit(
+  db: Db,
+  project: string,
+  observations: Observation[],
+  existingBeliefs: ExistingBeliefContext[],
+  deps: RunConsolidationDeps,
+  breaker: CircuitBreakerState
+): Promise<ExtractWithSplitResult> {
+  const stillHolding = await deps.renewLease(db, project, deps.runId, deps.leaseMs);
+  if (!stillHolding) {
+    return { candidates: [], failedIds: [], leaseLost: true };
+  }
+
+  try {
+    const candidates = await deps.extractFacts(observations, existingBeliefs);
+    breaker.consecutiveFailures = 0;
+    return { candidates, failedIds: [], leaseLost: false };
+  } catch (err) {
+    if (!isNonRetryableLLMError(err)) {
+      throw err;
+    }
+
+    if (observations.length === 1) {
+      const observationId = String(observations[0]._id);
+      const reasonName = err instanceof Error ? err.name : "UnknownError";
+      appendFailure("extractFacts.terminal", err);
+      console.error(
+        `[consolidate] project="${project}": observation ${observationId} failed extraction ` +
+          `non-retryably (${reasonName}); marking it failed so it is not retried forever.`
+      );
+      await (deps.markFailed ?? markObservationFailed)(
+        db,
+        project,
+        deps.runId,
+        observationId,
+        reasonName
+      );
+
+      breaker.consecutiveFailures += 1;
+      if (breaker.consecutiveFailures >= deps.maxConsecutiveTerminalExtractionFailures) {
+        console.error(
+          `[consolidate] project="${project}": circuit breaker tripped after ` +
+            `${breaker.consecutiveFailures} consecutive single-observation extraction failures ` +
+            `(last: ${reasonName}); aborting this run on the assumption of a global provider ` +
+            "problem (for example invalid credentials or quota exhaustion) rather than continuing " +
+            "to mark the rest of the queue failed one observation at a time. Observations already " +
+            `marked failed above stay failed; run --retry-failed ${project} once the provider is ` +
+            "healthy again to requeue them."
+        );
+        throw new ConsolidationCircuitBreakerError(
+          `project="${project}": aborted after ${breaker.consecutiveFailures} consecutive ` +
+            `single-observation extraction failures (${reasonName})`
+        );
+      }
+
+      return { candidates: [], failedIds: [observationId], leaseLost: false };
+    }
+
+    const mid = Math.ceil(observations.length / 2);
+    const left = observations.slice(0, mid);
+    const right = observations.slice(mid);
+
+    const leftResult = await extractWithSplit(db, project, left, existingBeliefs, deps, breaker);
+    if (leftResult.leaseLost) {
+      return leftResult;
+    }
+
+    const rightResult = await extractWithSplit(db, project, right, existingBeliefs, deps, breaker);
+    return {
+      candidates: [...leftResult.candidates, ...rightResult.candidates],
+      failedIds: [...leftResult.failedIds, ...rightResult.failedIds],
+      leaseLost: rightResult.leaseLost,
+    };
+  }
 }
 
 /**
@@ -147,7 +385,19 @@ export async function runConsolidation(
     }
 
     const existingBeliefs = await deps.fetchExistingBeliefs(db, project, deps.beliefsContextLimit);
-    const candidates = await deps.extractFacts(claimed, existingBeliefs);
+    const breaker: CircuitBreakerState = { consecutiveFailures: 0 };
+    const extraction = await extractWithSplit(db, project, claimed, existingBeliefs, deps, breaker);
+
+    if (extraction.leaseLost) {
+      console.error(
+        `[consolidate] project="${project}": lease lost mid-run during extraction (another run has ` +
+          "taken over); stopping and leaving the claimed observations for the stale-claim sweep to reclaim."
+      );
+      return { processed: 0, skipped: false, leaseLost: true };
+    }
+
+    const candidates = extraction.candidates;
+    const failedIds = new Set(extraction.failedIds);
 
     let processed = 0;
     let globalChanged = false;
@@ -175,6 +425,15 @@ export async function runConsolidation(
         console.error(
           `[consolidate] dropped candidate fact (${validation.reason}): "${candidate.text.slice(0, 80)}"`
         );
+        await quarantineSafely(
+          db,
+          project,
+          deps.runId,
+          candidate,
+          "deny-list",
+          validation.reason ?? "invalid",
+          deps.quarantineDropped ?? quarantineDroppedCandidate
+        );
         continue;
       }
 
@@ -183,6 +442,15 @@ export async function runConsolidation(
         console.error(
           `[consolidate] dropped candidate fact (classifyInjection flagged as prompt injection` +
             `${classification.reason ? `: ${classification.reason}` : ""}): "${candidate.text.slice(0, 80)}"`
+        );
+        await quarantineSafely(
+          db,
+          project,
+          deps.runId,
+          candidate,
+          "classifier",
+          classification.reason ?? "flagged",
+          deps.quarantineDropped ?? quarantineDroppedCandidate
         );
         continue;
       }
@@ -236,8 +504,13 @@ export async function runConsolidation(
     // through the LLM pass, whether or not it yielded a valid fact: it was
     // still fully processed, and leaving it "claimed" forever would only be
     // cleared by the reclaim sweep, causing repeated reprocessing of the
-    // same unproductive text.
-    const claimedIds = claimed.map((doc) => doc._id);
+    // same unproductive text. Observations extractWithSplit already moved to
+    // "failed" are excluded: markConsolidated's own status: "claimed" guard
+    // would no-op on them anyway, but excluding them here keeps this call's
+    // intent explicit rather than relying on that guard alone.
+    const claimedIds = claimed
+      .map((doc) => doc._id)
+      .filter((id) => !failedIds.has(String(id)));
     await deps.markConsolidated(db, project, deps.runId, claimedIds);
 
     return { processed, skipped: false };

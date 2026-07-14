@@ -1,0 +1,67 @@
+{
+  "runId": "5d01e0c5-f85a-4ace-91ad-e156ba44682d",
+  "model": "claude-sonnet-5",
+  "startedAt": "2026-07-14T09:34:04.316Z",
+  "finishedAt": "2026-07-14T09:45:33.450Z",
+  "scratchDb": "claude_memory_gauntlet_v2_chain",
+  "projectKey": "meridian-batch-0fcb72ba8f76",
+  "chainAssertions": [
+    {
+      "name": "exactly one active belief on this topic, asserting 120 seconds",
+      "pass": true
+    },
+    {
+      "name": "the 45-second belief exists and is archived",
+      "pass": true
+    },
+    {
+      "name": "the 90-second belief exists and is archived",
+      "pass": false
+    },
+    {
+      "name": "supersede lineage links the archived 45/90 beliefs to the active belief",
+      "pass": true
+    }
+  ],
+  "chain": [
+    {
+      "_id": "6a5603822c2848751f63fbae",
+      "status": "archived",
+      "version": 2,
+      "supersedes": null,
+      "text": "The meridian-batch worker service has a batch flush interval of 45 seconds (the worker flushes queued batch items to the destination on this interval)."
+    },
+    {
+      "_id": "6a560415b8cd619f27297112",
+      "status": "archived",
+      "version": 2,
+      "supersedes": "6a5603822c2848751f63fbae",
+      "text": "The meridian-batch worker service has a batch flush interval of 90 seconds (raised from 45 seconds following a queue backlog incident); the worker flushes queued batch items to the destination on this interval."
+    },
+    {
+      "_id": "6a56050aa4475847cc0ed0c8",
+      "status": "active",
+      "version": 1,
+      "supersedes": "6a560415b8cd619f27297112",
+      "text": "The meridian-batch worker service batch flush interval is finalized at 120 seconds (raised from 90 seconds following load testing); this supersedes the prior 90-second value."
+    }
+  ],
+  "recall": [
+    {
+      "trial": 1,
+      "verdict": "correct",
+      "staleEcho": true,
+      "timedOut": false,
+      "durationMs": 13136
+    },
+    {
+      "trial": 2,
+      "verdict": "correct",
+      "staleEcho": true,
+      "timedOut": false,
+      "durationMs": 24332
+    }
+  ],
+  "infraFailures": 0,
+  "contaminationFailure": false
+}

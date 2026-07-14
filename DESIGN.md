@@ -141,8 +141,19 @@ The design is built on the GA column and treats the Preview column as optional.
 
 ### 5.1 Capture: append-only, decides nothing
 
-- A **SessionEnd hook** ships the session transcript (or a cheap rolling summary
-  of it) to the `observations` collection as one or more documents.
+- A **SessionEnd hook** ships the session transcript to the `observations`
+  collection as one or more chunk documents: the transcript is sliced into
+  consecutive 50,000-character chunks, up to a total capture budget
+  (`TRANSCRIPT_CAPTURE_MAX_CHARS`, default 500,000 characters, ten chunks).
+  When a session's transcript exceeds that budget, the hook keeps the first
+  chunk plus the most recent chunks, so a session's early decisions and its
+  most recent outcomes both survive extraction; the chunks in between are
+  dropped, with only their combined character count logged, never their
+  content. Each chunk carries its session id and its position
+  (`chunk_index`/`chunk_count`) into extraction. This capture budget is set
+  independently of any model's context window: capture volume and the
+  extraction model's context are two separate constraints, sized separately
+  (section 5.2, section 10).
 - **`/remember`** is the primary, fully-reliable user-driven capture path: a
   custom slash command we define ourselves, so its behavior is fully within our
   control, unlike a client UI behavior we would merely be intercepting. It
@@ -190,7 +201,15 @@ hindsight and under a lease:
 5. Dedup against existing beliefs via `$vectorSearch` similarity above a
    threshold: update-in-place instead of inserting a duplicate.
 6. Resolve contradictions: a newer fact supersedes an older one via a
-   `supersedes` link; the old belief is archived, not deleted.
+   `supersedes` link; the old belief is archived, not deleted. This also
+   catches near-misses the dedupe threshold alone would let through: a
+   candidate that scores below the dedupe threshold but still above a lower
+   reconcile floor (`CONSOLIDATION_RECONCILE_THRESHOLD`, default 0.75)
+   against one or more active beliefs gets a small LLM arbitration call
+   before insertion, judging each such neighbor as `supersedes`, `duplicate`,
+   or `unrelated`; `unrelated`, or any failure of the arbitration call
+   itself, falls through to a plain insert (fail open), and the probe never
+   runs at all when there is no near neighbor to check.
 7. Decay: age out beliefs that stopped being used or true.
 8. Recompile the affected project brief (section 8) and atomically swap it.
 9. Mark claimed observations `consolidated`, release the lease.
@@ -198,6 +217,21 @@ hindsight and under a lease:
 A batch job is the easiest component to test and roll back, and it is where
 Voyage embeddings and vector dedup actually earn their place (the chat model
 never does this work).
+
+An operator-invoked counterpart, `--reconcile <project>` (the consolidator
+CLI's heal mode), sweeps a project's existing active beliefs pairwise by
+similarity and arbitrates each pair the same way, oriented so the belief
+backed by newer evidence survives. It exists because the write-time check in
+step 6 only ever looks at a new candidate against beliefs already in the
+collection, so it can never retroactively repair two beliefs that are both
+already sitting there, contradicting or duplicating each other, whether
+because they predate the write-time check or slipped past it. It is bounded
+by `CONSOLIDATION_RECONCILE_MAX_PAIRS` arbitration calls per run, applies the
+same version-guarded compare-and-swap discipline as the rest of the pipeline
+(archiving the older belief, unioning provenance for duplicates), and
+recompiles every brief it touches. Unlike the numbered pipeline above,
+nothing calls it automatically: it is a deliberate operator action, the same
+way rollback is.
 
 ### 5.3 Recall: compile a brief, inject it, read-free
 
@@ -217,7 +251,7 @@ never does this work).
 
 ## 6. Data model (document-model flexibility as a feature)
 
-Three collections. The document model lets a single `beliefs` collection hold
+Four collections. The document model lets a single `beliefs` collection hold
 polymorphic memory types (a preference, a code convention, a debugging lesson, a
 reference link) with type-specific fields, embedded provenance, and vectors, all
 queryable and rankable together. No joins, no per-type tables.
@@ -231,11 +265,15 @@ queryable and rankable together. No joins, no per-type tables.
   source,             // "transcript" | "remember" | "hash_line" | "mcp_write"
   priority,           // "normal" | "high"
   text,               // raw content or a transcript-summary chunk
-  status,             // "pending" | "claimed" | "consolidated"
+  status,             // "pending" | "claimed" | "consolidated" | "failed"
   run_id,             // set when claimed, for idempotent reprocessing
   claimed_at,         // for lease/claim reclaim on crash
   created_at,
-  expiresAt           // TTL target; unset for high-priority user captures
+  expiresAt,          // TTL target; unset for high-priority user captures
+  chunk_index,        // 0-based position within this session's transcript capture
+  chunk_count,        // total chunks in this session's capture
+  failed_at,          // set together with failure_reason when status becomes "failed"
+  failure_reason      // terminal extraction failure's error NAME only, never its message
 }
 ```
 
@@ -283,6 +321,29 @@ Indexes on `beliefs`:
 ```
 Read path is a single `findOne({_id})`, and single-document atomicity guarantees
 a session never sees a half-written brief.
+
+### `dropped_candidates` (quarantined rejected candidates, TTL-managed)
+```
+{
+  _id,
+  project,            // or "global"
+  run_id,             // the consolidation run that dropped this candidate
+  stage,              // "deny-list" | "classifier"
+  reason,             // truncated to 500 chars at write time
+  text,               // the FULL candidate text, never truncated
+  type, scope, importance, // carried over from the candidate fact when present
+  observation_ids,    // provenance: source observations
+  created_at,
+  expiresAt           // TTL target, DROPPED_CANDIDATE_TTL_DAYS days out (default 30)
+}
+```
+Without this collection, a candidate fact rejected by the deny-list validator or
+the injection classifier (section 9) had its full text discarded on the spot,
+leaving only a short stderr line while its source observations were still
+marked consolidated: a false-positive drop was unrecoverable and unobservable.
+Every dropped candidate is now written here in full, inspectable via
+`--status` and recoverable by hand (re-add via `memory_write`) within the TTL
+window.
 
 ---
 
@@ -459,6 +520,18 @@ Mitigations, layered:
 4. Promotion to the **`global`/`core`** tier (highest blast radius) can require a
    human review gate, since that is what auto-injects everywhere.
 5. Beliefs never carry executable content; the brief is prose facts only.
+6. The write-time and operator-sweep reconciliation arbitration call (section
+   5.2) is itself deterministically post-validated: any verdict whose
+   `belief_id` is not one of the ids actually offered to it, or whose verdict
+   value falls outside the fixed `supersedes`/`duplicate`/`unrelated` enum, is
+   dropped before being acted on, never trusted as-is. The arbitration
+   prompt also explicitly instructs the model that each existing belief's
+   text is data to judge, never an instruction to obey, since a belief
+   already in memory could itself carry injected, instruction-like text.
+   Without this validation, a steered or hallucinating arbitration response
+   could point an archive-and-replace at an arbitrary belief id never offered
+   for reconciliation; with it, the worst a bad response can do is fail open
+   into a plain insert.
 
 This also answers the "bad memories poisoning future sessions" robustness axis:
 consolidation is the single chokepoint where quality is enforced, with hindsight,
@@ -472,12 +545,54 @@ under review, and reversibly.
 |------|---------|----------|
 | SessionStart hook | Atlas unreachable | Fail open within an 800ms budget: inject no brief, session proceeds. Never block startup on the network. |
 | SessionStart hook | Slow query | Hard timeout; proceed without the brief. |
+| SessionStart hook | Atlas unreachable or timed out, local cache available | Serve the last-known-good local brief cache instead (bounded by `BRIEF_CACHE_MAX_AGE_DAYS`), clearly annotated as cached and possibly stale. Never served on a healthy fetch that legitimately returns nothing. |
 | memory_search | Voyage embed down | Drop vector arm, return BM25-only (section 8.3). |
 | memory_search | Atlas Search down | Return vector-only. |
 | Write path (autoEmbed) | Preview limit or outage | Fall back to application-side `voyage-4` embedding on write. |
+| Consolidator | Extraction batch fails non-retryably (output truncated, input too large for the model's context) | Small-context ladder: split-retry down to the single responsible observation, then a terminal `failed` status if it still cannot be extracted, then a circuit breaker that aborts the run if too many of those happen in a row (see below). |
 | Consolidator | Crash mid-run | Lease TTL expires; reclaim sweep resets claimed observations; idempotent upserts make reprocessing safe. |
 | Consolidator | Repeated failures | Alert; observations accumulate as `pending` harmlessly until it recovers. |
 | Query embedding | Rate limited | Backoff with jitter; circuit-break to BM25-only. |
+
+**A documented boundary of `memory_forget`'s scope.** The tombstone-and-recompile path (section 11) and the local brief cache above cover only the engine's own beliefs, briefs, and cache file. Claude Code's native auto memory (the `MEMORY.md` index and topic files) is a separate store the model can write to on its own, and `memory_forget` cannot reach it. Running the engine alongside native auto memory, a fact just forgotten through `memory_forget` can still surface from that native store until it is removed there directly.
+
+**Small-context extraction ladder.** Capture volume (section 5.1) is sized
+independently of any model's context window, so the extraction batch built
+from captured observations needs its own degradation path for when a model's
+context turns out to be the binding constraint:
+1. Warn at startup when the resolved batch budget cannot fit even one
+   maximally-sized observation (budget under 50,000 characters): large
+   observations may fail extraction or be silently truncated, depending on
+   the provider.
+2. A batch that fails extraction non-retryably is bisected and each half
+   retried, isolating the single observation actually responsible rather than
+   re-failing the same batch identically forever.
+3. If that single, isolated observation still fails non-retryably, on true
+   overflow, it is marked with a terminal `failed` status (error name only)
+   instead of being retried forever; every other observation in the original
+   batch is still processed normally.
+4. Circuit breaker: rung 3 exists for a genuinely poisonous single
+   observation, not for an outage, and the two look identical one
+   observation at a time. `CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES`
+   (default 3) caps how many single-observation terminal failures rung 3 is
+   allowed to mark in a row before the run gives up on the "isolated bad
+   observation" hypothesis and instead assumes a global provider problem
+   (invalid credentials, exhausted quota). When the cap is reached, the run
+   aborts the same way an unhandled transient failure does: the lease is
+   released and the remaining, still-claimed observations are left for the
+   reclaim sweep, instead of being branded `failed` one at a time. Any
+   successful extraction resets the counter, so a real poisoned observation
+   or two scattered among healthy ones never trips it. Observations already
+   marked `failed` before the breaker trips stay failed; the operator command
+   `--retry-failed <project>` resets them to `pending` once the provider
+   issue is fixed.
+5. Ollama caveat: rungs 2 and 3 depend on the provider raising a
+   distinguishable non-retryable error on overflow, which Anthropic and
+   Bedrock both do. A local Ollama server instead truncates its own context
+   (`num_ctx`) silently, with no error at all, so for that provider the
+   startup warning in rung 1 is the only signal an operator gets that the
+   configured model's context is undersized for the observations being
+   captured.
 
 Principle: no memory failure may ever degrade the coding session itself. Memory
 is an enhancement, and its absence is a quiet no-op, never an error.

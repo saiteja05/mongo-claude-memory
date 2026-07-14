@@ -20,13 +20,16 @@ const ENV_KEYS = [
   "LLM_PROVIDER",
   "OLLAMA_BASE_URL",
   "OLLAMA_MODEL",
+  "OLLAMA_CONTEXT_TOKENS",
   "CONSOLIDATION_LEASE_MS",
   "CONSOLIDATION_BATCH_SIZE",
+  "CONSOLIDATION_BATCH_MAX_CHARS",
   "CONSOLIDATION_RECLAIM_MS",
   "CONSOLIDATION_BELIEFS_CONTEXT_LIMIT",
   "CONSOLIDATION_DEDUPE_THRESHOLD",
   "CONSOLIDATION_RECONCILE_THRESHOLD",
   "CONSOLIDATION_RECONCILE_MAX_PAIRS",
+  "CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES",
   "TRANSCRIPT_CAPTURE_MAX_CHARS",
   "DROPPED_CANDIDATE_TTL_DAYS",
   "BRIEF_CACHE_MAX_AGE_DAYS",
@@ -108,7 +111,11 @@ describe("loadConfig", () => {
     expect(config.observationTtlDays).toBe(30);
     expect(config.sessionEndTimeoutMs).toBe(5000);
     expect(config.llmTimeoutMs).toBe(60000);
-    expect(config.consolidationBatchMaxChars).toBe(300000);
+    // Unset by default: consolidation/cli.ts's resolveBatchMaxChars falls
+    // back to a model-aware default (llm/contextWindow.ts) when this is
+    // undefined, rather than one fixed number regardless of provider.
+    expect(config.consolidationBatchMaxChars).toBeUndefined();
+    expect(config.ollamaContextTokens).toBe(8192);
     expect(config.voyageApiKey).toBeUndefined();
     expect(config.voyageBaseUrl).toBe("https://api.voyageai.com");
   });
@@ -279,6 +286,78 @@ describe("loadConfig", () => {
     });
   });
 
+  describe("ollamaContextTokens (OLLAMA_CONTEXT_TOKENS)", () => {
+    it("defaults to 8192 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.ollamaContextTokens).toBe(8192);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.OLLAMA_CONTEXT_TOKENS = "16384";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.ollamaContextTokens).toBe(16384);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.OLLAMA_CONTEXT_TOKENS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.ollamaContextTokens).toBe(8192);
+    });
+
+    it("falls back to the default when the override is below the 1024 floor", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.OLLAMA_CONTEXT_TOKENS = "512";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.ollamaContextTokens).toBe(8192);
+    });
+  });
+
+  describe("consolidationBatchMaxChars (CONSOLIDATION_BATCH_MAX_CHARS)", () => {
+    it("is undefined when unset, so cli.ts's resolveBatchMaxChars can fall back to a model-aware default", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.consolidationBatchMaxChars).toBeUndefined();
+    });
+
+    it("respects an explicit override, with no min bound", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_BATCH_MAX_CHARS = "12345";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.consolidationBatchMaxChars).toBe(12345);
+    });
+
+    it("becomes undefined (not a fixed fallback) when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_BATCH_MAX_CHARS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.consolidationBatchMaxChars).toBeUndefined();
+    });
+  });
+
   it("respects an explicit VOYAGE_BASE_URL override", async () => {
     process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
     process.env.VOYAGE_BASE_URL = "https://ai.mongodb.com";
@@ -437,6 +516,47 @@ describe("loadConfig", () => {
       const config = loadConfig();
 
       expect(config.reconcileMaxPairs).toBe(25);
+    });
+  });
+
+  describe("maxConsecutiveTerminalExtractionFailures (CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES)", () => {
+    it("defaults to 3 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.maxConsecutiveTerminalExtractionFailures).toBe(3);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES = "5";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.maxConsecutiveTerminalExtractionFailures).toBe(5);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.maxConsecutiveTerminalExtractionFailures).toBe(3);
+    });
+
+    it("falls back to the default when the override is below the 1 floor", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES = "0";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.maxConsecutiveTerminalExtractionFailures).toBe(3);
     });
   });
 

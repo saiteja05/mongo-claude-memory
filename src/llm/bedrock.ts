@@ -4,6 +4,7 @@ import {
   type ContentBlock,
 } from "@aws-sdk/client-bedrock-runtime";
 import { loadConfig } from "../config.js";
+import { NonRetryableLLMError, isNonRetryableLLMError } from "./errors.js";
 
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 300;
@@ -31,8 +32,6 @@ function isRetryableError(err: unknown): boolean {
     name === "ModelTimeoutException"
   );
 }
-
-class NonRetryableBedrockError extends Error {}
 
 let cachedClient: BedrockRuntimeClient | undefined;
 
@@ -101,7 +100,7 @@ export async function callWithTool(
       // (a retry would truncate identically) so the batch stays claimed and
       // reclaimable.
       if (response.stopReason === "max_tokens") {
-        throw new NonRetryableBedrockError(
+        throw new NonRetryableLLMError(
           "extraction output truncated by max_tokens; reduce batch size"
         );
       }
@@ -112,7 +111,7 @@ export async function callWithTool(
       );
 
       if (!toolUse || !toolUse.toolUse) {
-        throw new NonRetryableBedrockError(
+        throw new NonRetryableLLMError(
           `Bedrock response did not include a toolUse block for "${toolName}"`
         );
       }
@@ -120,7 +119,7 @@ export async function callWithTool(
       return toolUse.toolUse.input;
     } catch (err) {
       lastError = err;
-      if (err instanceof NonRetryableBedrockError || !isRetryableError(err)) {
+      if (isNonRetryableLLMError(err) || !isRetryableError(err)) {
         break;
       }
       if (attempt < MAX_ATTEMPTS) {
@@ -136,7 +135,16 @@ export async function callWithTool(
   }
 
   const reason = lastError instanceof Error ? lastError.message : "unknown error";
-  throw new Error(`Bedrock converse call failed after ${MAX_ATTEMPTS} attempts: ${reason}`);
+  const message = `Bedrock converse call failed after ${MAX_ATTEMPTS} attempts: ${reason}`;
+  // Classification-preserving, and mirrors the retry loop's own early-break
+  // condition above: isRetryableError(lastError) is included here too (not
+  // just the explicit NonRetryableLLMError class), because on Bedrock a
+  // too-long input surfaces as a plain AWS ValidationException rather than
+  // the explicit max_tokens/missing-toolUse signal, so relying on the class
+  // alone would leave that failure mode unclassified and never split by
+  // consolidation's split-retry.
+  const nonRetryable = isNonRetryableLLMError(lastError) || !isRetryableError(lastError);
+  throw nonRetryable ? new NonRetryableLLMError(message) : new Error(message);
 }
 
 // Exposed for tests only, to reset the cached client between mocked runs.

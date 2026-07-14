@@ -1,0 +1,6 @@
+{
+  "runId": "72615529-ec8d-41db-9e7d-3a65f1ab5900",
+  "createdAt": "2026-07-14T10:01:07.469Z",
+  "model": "claude-sonnet-5",
+  "dbName": "claude_memory_gauntlet_v2_forget"
+}

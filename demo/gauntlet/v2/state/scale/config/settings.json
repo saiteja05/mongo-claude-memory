@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/teja.boddapati/Desktop/mongo-claude-memory/dist/hooks/sessionStart.js"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/teja.boddapati/Desktop/mongo-claude-memory/dist/hooks/userPromptSubmit.js"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/teja.boddapati/Desktop/mongo-claude-memory/dist/hooks/sessionEnd.js"
+          }
+        ]
+      }
+    ]
+  }
+}

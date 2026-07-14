@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { getStatusReport, formatStatusReport } from "../src/consolidation/status.js";
-import { OBSERVATIONS, BELIEFS, BRIEFS, LOCKS } from "../src/db/schema.js";
+import { OBSERVATIONS, BELIEFS, BRIEFS, LOCKS, DROPPED_CANDIDATES } from "../src/db/schema.js";
 
 function makeFakeDb(opts: {
   observationGroups?: unknown[];
@@ -8,6 +8,7 @@ function makeFakeDb(opts: {
   beliefGroups?: unknown[];
   locks?: Record<string, unknown>[];
   briefs?: Record<string, unknown>[];
+  droppedCandidateGroups?: unknown[];
 }) {
   const countDocuments = vi.fn(async () => opts.staleClaimCount ?? 0);
 
@@ -24,16 +25,27 @@ function makeFakeDb(opts: {
   const briefsCollection = {
     find: vi.fn(() => ({ toArray: async () => opts.briefs ?? [] })),
   };
+  const droppedCandidatesCollection = {
+    aggregate: vi.fn(() => ({ toArray: async () => opts.droppedCandidateGroups ?? [] })),
+  };
 
   const collections: Record<string, unknown> = {
     [OBSERVATIONS]: observationsCollection,
     [BELIEFS]: beliefsCollection,
     [LOCKS]: locksCollection,
     [BRIEFS]: briefsCollection,
+    [DROPPED_CANDIDATES]: droppedCandidatesCollection,
   };
 
   const db = { collection: (name: string) => collections[name] };
-  return { db, observationsCollection, beliefsCollection, locksCollection, briefsCollection };
+  return {
+    db,
+    observationsCollection,
+    beliefsCollection,
+    locksCollection,
+    briefsCollection,
+    droppedCandidatesCollection,
+  };
 }
 
 describe("getStatusReport", () => {
@@ -64,6 +76,30 @@ describe("getStatusReport", () => {
       { project: "proj-a", status: "consolidated", count: 7 },
     ]);
     expect(report.beliefCounts).toEqual([{ project: "proj-a", status: "active", count: 5 }]);
+  });
+
+  it("maps grouped dropped-candidate counts by project/stage", async () => {
+    const { db } = makeFakeDb({
+      droppedCandidateGroups: [
+        { _id: { project: "proj-a", stage: "deny-list" }, count: 2 },
+        { _id: { project: "proj-a", stage: "classifier" }, count: 1 },
+      ],
+    });
+
+    const report = await getStatusReport(db as any, 600000);
+
+    expect(report.droppedCandidates).toEqual([
+      { project: "proj-a", stage: "deny-list", count: 2 },
+      { project: "proj-a", stage: "classifier", count: 1 },
+    ]);
+  });
+
+  it("returns an empty dropped-candidates array when the collection has no documents", async () => {
+    const { db } = makeFakeDb({});
+
+    const report = await getStatusReport(db as any, 600000);
+
+    expect(report.droppedCandidates).toEqual([]);
   });
 
   it("counts stale claims via countDocuments with the reclaim threshold, without mutating them", async () => {
@@ -124,6 +160,7 @@ describe("formatStatusReport", () => {
       locks: [],
       beliefCounts: [],
       briefs: [],
+      droppedCandidates: [],
     });
 
     expect(text).toMatch(/snapshot/i);
@@ -138,6 +175,7 @@ describe("formatStatusReport", () => {
       locks: [{ project: "proj-a", holder: "run-1", heldUntil: now, live: true }],
       beliefCounts: [{ project: "proj-a", status: "active", count: 5 }],
       briefs: [{ id: "brief:proj-a", tokenEstimate: 100, beliefCount: 5, generation: 2, generatedAt: now }],
+      droppedCandidates: [],
     });
 
     expect(text).toContain("proj-a");
@@ -145,5 +183,67 @@ describe("formatStatusReport", () => {
     expect(text).toContain("run-1");
     expect(text).toContain("brief:proj-a");
     expect(text).not.toMatch(/—/);
+  });
+
+  it("renders a (none) fallback for dropped candidates when there are none quarantined", () => {
+    const text = formatStatusReport({
+      observationCounts: [],
+      staleClaimCount: 0,
+      locks: [],
+      beliefCounts: [],
+      briefs: [],
+      droppedCandidates: [],
+    });
+
+    expect(text).toContain("Dropped candidates (quarantined, TTL-bounded):");
+    const lines = text.split("\n");
+    const headingIndex = lines.findIndex((line) => line.includes("Dropped candidates"));
+    expect(lines[headingIndex + 1]).toContain("(none)");
+  });
+
+  it("renders dropped-candidate rows by project/stage", () => {
+    const text = formatStatusReport({
+      observationCounts: [],
+      staleClaimCount: 0,
+      locks: [],
+      beliefCounts: [],
+      briefs: [],
+      droppedCandidates: [{ project: "proj-a", stage: "deny-list", count: 3 }],
+    });
+
+    expect(text).toContain('project="proj-a"');
+    expect(text).toContain("stage=deny-list");
+    expect(text).toContain("3");
+    expect(text).not.toMatch(/—/);
+  });
+
+  it("renders the failed-observations summary line as 0 when there are no failed observations", () => {
+    const text = formatStatusReport({
+      observationCounts: [{ project: "proj-a", status: "pending", count: 3 }],
+      staleClaimCount: 0,
+      locks: [],
+      beliefCounts: [],
+      briefs: [],
+      droppedCandidates: [],
+    });
+
+    expect(text).toContain("Failed observations (terminal, will not retry): 0");
+  });
+
+  it("sums failed-observation counts across projects into the summary line, without an extra query", () => {
+    const text = formatStatusReport({
+      observationCounts: [
+        { project: "proj-a", status: "failed", count: 2 },
+        { project: "proj-b", status: "failed", count: 5 },
+        { project: "proj-a", status: "pending", count: 1 },
+      ],
+      staleClaimCount: 0,
+      locks: [],
+      beliefCounts: [],
+      briefs: [],
+      droppedCandidates: [],
+    });
+
+    expect(text).toContain("Failed observations (terminal, will not retry): 7");
   });
 });

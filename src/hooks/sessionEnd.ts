@@ -118,93 +118,180 @@ export function chunkTranscript(
 }
 
 /**
- * Pure-ish core: reads the full transcript, strips any injected brief content
- * from it (echo-loop defense), chunks what is left, and, if there is
- * anything to capture, writes one observation per chunk in a single bulk
- * call. Never throws; any failure (missing transcript, writeObservations
- * rejecting) is swallowed so the hook can always fail open per DESIGN.md
- * section 10.
+ * Core capture logic, deliberately left free to throw or reject: reads the
+ * full transcript, strips any injected brief content from it (echo-loop
+ * defense), chunks what is left, and, if there is anything to capture,
+ * writes one observation per chunk in a single bulk call.
+ *
+ * Unlike captureSessionEnd just below, this function does NOT swallow its
+ * own errors. captureSessionEndWithTimeout needs the real settlement
+ * (resolved or rejected) of the in-flight write to tell a late-arriving
+ * success from a late-arriving failure once a race against the timeout
+ * budget is lost; captureSessionEnd wraps this in its own fail-open
+ * try/catch for every other, non-timeout-aware caller.
+ */
+async function runSessionEndCapture(input: SessionEndInput, deps: SessionEndDeps): Promise<void> {
+  const raw = await deps.readTranscript(input.transcript_path);
+  if (!raw) return;
+
+  const project = deps.getProjectKey(input.cwd);
+
+  let briefs: BriefResult = { global: null, project: null };
+  if (deps.getBriefs) {
+    try {
+      briefs = await deps.getBriefs(project, BRIEF_STRIP_TIMEOUT_MS);
+    } catch {
+      // Fail open: stripping is best-effort, capture proceeds unstripped.
+    }
+  }
+
+  // Strip on the FULL transcript, before chunking: a brief straddling a
+  // chunk boundary would survive as two unmatched halves if it were
+  // stripped chunk-by-chunk instead, since stripInjectedBriefs only removes
+  // an EXACT whole-string match.
+  const text = stripInjectedBriefs(raw, [briefs.global, briefs.project]);
+  if (!text.trim()) return;
+
+  const maxChunks = Math.max(
+    1,
+    Math.floor(deps.transcriptCaptureMaxChars / TRANSCRIPT_TAIL_LENGTH)
+  );
+  const { chunks, droppedChars } = chunkTranscript(text, TRANSCRIPT_TAIL_LENGTH, maxChunks);
+  if (chunks.length === 0) return;
+
+  if (droppedChars > 0) {
+    // Counts only, never content: a dropped transcript slice can contain
+    // anything the session touched.
+    console.error(
+      `sessionEnd: transcript capture dropped ${droppedChars} chars, keeping ${chunks.length} of ${maxChunks} max chunks`
+    );
+  }
+
+  const chunkCount = chunks.length;
+  const paramsList: WriteObservationParams[] = chunks.map((chunkText, index) => ({
+    project,
+    session_id: input.session_id,
+    source: "transcript",
+    priority: "normal",
+    text: chunkText,
+    chunk_index: index,
+    chunk_count: chunkCount,
+  }));
+
+  await deps.writeObservations(paramsList);
+}
+
+/**
+ * Pure-ish core: a thin fail-open wrapper around runSessionEndCapture. Never
+ * throws; any failure (missing transcript that throws instead of resolving
+ * null, writeObservations rejecting) is swallowed so the hook can always
+ * fail open per DESIGN.md section 10, and is also recorded as one name-only
+ * appendFailure("sessionEnd.captureError", <error name>) line, so a genuine,
+ * non-timeout capture failure is not completely invisible to an operator
+ * either.
  */
 export async function captureSessionEnd(
   input: SessionEndInput,
   deps: SessionEndDeps
 ): Promise<void> {
   try {
-    const raw = await deps.readTranscript(input.transcript_path);
-    if (!raw) return;
-
-    const project = deps.getProjectKey(input.cwd);
-
-    let briefs: BriefResult = { global: null, project: null };
-    if (deps.getBriefs) {
-      try {
-        briefs = await deps.getBriefs(project, BRIEF_STRIP_TIMEOUT_MS);
-      } catch {
-        // Fail open: stripping is best-effort, capture proceeds unstripped.
-      }
-    }
-
-    // Strip on the FULL transcript, before chunking: a brief straddling a
-    // chunk boundary would survive as two unmatched halves if it were
-    // stripped chunk-by-chunk instead, since stripInjectedBriefs only removes
-    // an EXACT whole-string match.
-    const text = stripInjectedBriefs(raw, [briefs.global, briefs.project]);
-    if (!text.trim()) return;
-
-    const maxChunks = Math.max(
-      1,
-      Math.floor(deps.transcriptCaptureMaxChars / TRANSCRIPT_TAIL_LENGTH)
-    );
-    const { chunks, droppedChars } = chunkTranscript(text, TRANSCRIPT_TAIL_LENGTH, maxChunks);
-    if (chunks.length === 0) return;
-
-    if (droppedChars > 0) {
-      // Counts only, never content: a dropped transcript slice can contain
-      // anything the session touched.
-      console.error(
-        `sessionEnd: transcript capture dropped ${droppedChars} chars, keeping ${chunks.length} of ${maxChunks} max chunks`
-      );
-    }
-
-    const chunkCount = chunks.length;
-    const paramsList: WriteObservationParams[] = chunks.map((chunkText, index) => ({
-      project,
-      session_id: input.session_id,
-      source: "transcript",
-      priority: "normal",
-      text: chunkText,
-      chunk_index: index,
-      chunk_count: chunkCount,
-    }));
-
-    await deps.writeObservations(paramsList);
-  } catch {
-    // Fail open: a hook must never surface a memory-path error to the user.
+    await runSessionEndCapture(input, deps);
+  } catch (err) {
+    appendFailure("sessionEnd.captureError", err);
   }
 }
 
+export interface SessionEndCaptureResult {
+  /** "timeout" when the internal race against timeoutMs was lost. */
+  outcome: "completed" | "timeout";
+  /**
+   * Only set when outcome is "timeout": the still in-flight capture, with
+   * errors already swallowed (this promise itself never rejects), so
+   * main() can await it before closeDb() runs instead of severing a
+   * slow-but-successful insert mid-flight. A write that eventually succeeds
+   * still lands; one that eventually fails is dropped, but neither case
+   * throws here or leaves an unhandled rejection behind.
+   */
+  pendingWrite: Promise<void> | null;
+}
+
 /**
- * Races captureSessionEnd against timeoutMs, same pattern as fetchBrief.ts's
- * getBriefs: on timeout, resolves (does not reject) so the caller always
- * fails open regardless of whether the body finished in time.
+ * Races runSessionEndCapture against timeoutMs, same pendingWrite pattern as
+ * userPromptSubmit.ts's runUserPromptSubmitHook: on timeout, the in-flight
+ * capture is NOT abandoned. It is handed back as pendingWrite so the caller
+ * can await it, right where closeDb() would otherwise have severed it mid
+ * insert, instead of the old behavior where Promise.race simply discarded
+ * whichever side of the race lost, silently dropping a write that was about
+ * to succeed.
+ *
+ * Failure semantics:
+ * - A timeout is ALWAYS reported, the instant the race is lost, via
+ *   appendFailure("sessionEnd.timeout", "CaptureTimeout"), before
+ *   pendingWrite is ever awaited: the pending await happens strictly after
+ *   this verdict, so the telemetry line exists even if the process is
+ *   killed before the pending write settles.
+ * - Once pendingWrite does settle, the result is recorded either way: a
+ *   write that actually completes after the timeout additionally logs
+ *   appendFailure("sessionEnd.lateCapture", "CaptureLandedLate"), so an
+ *   operator can tell a race that still landed the data from one that lost
+ *   it outright; a write that ultimately fails logs
+ *   appendFailure("sessionEnd.captureError", <error name>) instead, the same
+ *   as any other non-timeout capture failure.
+ * - The normal (non-timeout) fast path logs nothing new; a fast-path failure
+ *   (settled before the timeout, but rejected) still logs
+ *   "sessionEnd.captureError" so it is never silent either.
+ *
+ * Every log line is name-only (component plus a fixed reason or the error's
+ * name), never transcript content. This function itself never throws: every
+ * branch resolves.
  */
 export async function captureSessionEndWithTimeout(
   input: SessionEndInput,
   deps: SessionEndDeps,
   timeoutMs: number
-): Promise<void> {
-  const bodyPromise = captureSessionEnd(input, deps).catch(() => undefined);
+): Promise<SessionEndCaptureResult> {
+  const bodyPromise = runSessionEndCapture(input, deps);
 
-  const timeoutPromise = new Promise<void>((resolve) => {
-    const timer = setTimeout(() => resolve(), timeoutMs);
+  // Never let the body's own rejection surface as an unhandled rejection or
+  // fail the Promise.race below: turn it into a plain settlement record
+  // immediately, right where the promise is created.
+  const bodySettled = bodyPromise.then(
+    () => ({ ok: true as const }),
+    (err: unknown) => ({ ok: false as const, err })
+  );
+
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), timeoutMs);
     timer.unref?.();
   });
 
-  try {
-    await Promise.race([bodyPromise, timeoutPromise]);
-  } catch {
-    // Fail open: never let a hook throw.
+  const verdict = await Promise.race([
+    bodySettled.then(() => "completed" as const),
+    timeoutPromise,
+  ]);
+
+  if (verdict === "timeout") {
+    appendFailure("sessionEnd.timeout", "CaptureTimeout");
+    return {
+      outcome: "timeout",
+      pendingWrite: bodySettled.then((settled) => {
+        if (settled.ok) {
+          appendFailure("sessionEnd.lateCapture", "CaptureLandedLate");
+        } else {
+          appendFailure("sessionEnd.captureError", settled.err);
+        }
+      }),
+    };
   }
+
+  // Fast path: the body settled before the timeout. A failure here is a
+  // genuine (non-timeout) capture failure, not a lost race, so it is logged
+  // the same way captureSessionEnd logs one for any other direct caller.
+  const settled = await bodySettled;
+  if (!settled.ok) {
+    appendFailure("sessionEnd.captureError", settled.err);
+  }
+  return { outcome: "completed", pendingWrite: null };
 }
 
 async function readTranscript(transcriptPath: string): Promise<string | null> {
@@ -237,6 +324,7 @@ async function main(): Promise<void> {
   // Everything routes through the single process.exit(0) at the end of the
   // finally block below, never an early process.exit() inside try: exit()
   // terminates the process immediately and skips any later finally.
+  let pendingWrite: Promise<void> | null = null;
   try {
     if (!process.env.MDB_MCP_CONNECTION_STRING && !process.env.MEMORY_MONGODB_URI) {
       return;
@@ -258,11 +346,19 @@ async function main(): Promise<void> {
       },
     };
 
-    await captureSessionEndWithTimeout(input, deps, config.sessionEndTimeoutMs);
+    const result = await captureSessionEndWithTimeout(input, deps, config.sessionEndTimeoutMs);
+    pendingWrite = result.pendingWrite;
   } catch (err) {
     // Fail open: never let a hook throw. Leave one line of local telemetry.
     appendFailure("sessionEnd", err);
   } finally {
+    // Await any still-in-flight capture before closing the DB connection: a
+    // timeout outcome means the write raced past its budget, not that it was
+    // abandoned, so closeDb() must not sever it mid-insert (same pattern as
+    // userPromptSubmit.ts's main()).
+    if (pendingWrite) {
+      await pendingWrite;
+    }
     try {
       await closeDb();
     } catch {

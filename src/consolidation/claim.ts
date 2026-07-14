@@ -40,10 +40,15 @@ export async function reclaimStale(
   return result.modifiedCount;
 }
 
-// Default character budget for one extraction batch, matching config.ts's
-// CONSOLIDATION_BATCH_MAX_CHARS default. batchSize alone counts observations,
-// but a transcript observation can be 50k chars, so a count-only bound could
-// build an extraction prompt past the model's context limit.
+// Fallback character budget for one extraction batch, used only by direct
+// callers/tests that omit maxChars entirely. The CLI entry point
+// (consolidation/cli.ts) no longer relies on this default: it resolves a
+// model-aware budget via resolveBatchMaxChars/llm/contextWindow.ts's
+// computeBatchMaxCharsDefault, sized to the configured consolidation model's
+// context window, and always passes that explicit value in here instead.
+// batchSize alone counts observations, but a transcript observation can be
+// 50k chars, so a count-only bound could build an extraction prompt past the
+// model's context limit.
 const DEFAULT_BATCH_MAX_CHARS = 300000;
 
 /**

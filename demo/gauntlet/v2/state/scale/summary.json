@@ -1,0 +1,138 @@
+{
+  "runId": "27218710-1973-4455-8d86-9f785f38f4a2",
+  "startedAt": "2026-07-14T09:27:38.432Z",
+  "finishedAt": "2026-07-14T09:29:21.414Z",
+  "scratchDb": "claude_memory_gauntlet_v2_scale",
+  "projectKey": "v2-scale-fixture-15c262993592",
+  "model": "claude-sonnet-5",
+  "fixture": {
+    "seed": 20260713,
+    "targetCount": 12,
+    "fillerCount": 188,
+    "totalBeliefs": 200
+  },
+  "brief": {
+    "tokenEstimate": 1193,
+    "tokenCap": 1200,
+    "beliefIdsCount": 80,
+    "targetsInBrief": 12,
+    "targetsInBriefIds": [
+      "t01",
+      "t02",
+      "t03",
+      "t04",
+      "t05",
+      "t06",
+      "t07",
+      "t08",
+      "t09",
+      "t10",
+      "t11",
+      "t12"
+    ],
+    "targetsMissingFromBrief": []
+  },
+  "recall": {
+    "ran": true,
+    "correct": 12,
+    "total": 12,
+    "perTarget": [
+      {
+        "id": "t01",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 6894,
+        "timedOut": false
+      },
+      {
+        "id": "t02",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7206,
+        "timedOut": false
+      },
+      {
+        "id": "t03",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 5960,
+        "timedOut": false
+      },
+      {
+        "id": "t04",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7042,
+        "timedOut": false
+      },
+      {
+        "id": "t05",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7638,
+        "timedOut": false
+      },
+      {
+        "id": "t06",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7532,
+        "timedOut": false
+      },
+      {
+        "id": "t07",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 8847,
+        "timedOut": false
+      },
+      {
+        "id": "t08",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7713,
+        "timedOut": false
+      },
+      {
+        "id": "t09",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 6668,
+        "timedOut": false
+      },
+      {
+        "id": "t10",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 6761,
+        "timedOut": false
+      },
+      {
+        "id": "t11",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 7256,
+        "timedOut": false
+      },
+      {
+        "id": "t12",
+        "inBrief": true,
+        "correct": true,
+        "verdict": "correct",
+        "durationMs": 8011,
+        "timedOut": false
+      }
+    ]
+  }
+}

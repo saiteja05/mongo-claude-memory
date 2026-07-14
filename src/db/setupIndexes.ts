@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Db } from "mongodb";
 import { getDb, closeDb } from "./client.js";
 import { loadConfig } from "../config.js";
-import { OBSERVATIONS, BELIEFS, BRIEFS, LOCKS } from "./schema.js";
+import { OBSERVATIONS, BELIEFS, BRIEFS, LOCKS, DROPPED_CANDIDATES } from "./schema.js";
 
 /**
  * Idempotent Atlas setup: creates collections and indexes if they do not
@@ -34,6 +34,21 @@ async function ensureTtlIndex(db: Db): Promise<void> {
     { name: "expiresAt_ttl", expireAfterSeconds: 0 }
   );
   console.log(`[indexes] created TTL index "${OBSERVATIONS}.expiresAt_ttl"`);
+}
+
+async function ensureDroppedCandidatesTtlIndex(db: Db): Promise<void> {
+  const collection = db.collection(DROPPED_CANDIDATES);
+  const existing = await collection.indexes();
+  const found = existing.find((idx) => idx.name === "expiresAt_ttl");
+  if (found) {
+    console.log(`[indexes] "${DROPPED_CANDIDATES}.expiresAt_ttl" already exists, skipping`);
+    return;
+  }
+  await collection.createIndex(
+    { expiresAt: 1 },
+    { name: "expiresAt_ttl", expireAfterSeconds: 0 }
+  );
+  console.log(`[indexes] created TTL index "${DROPPED_CANDIDATES}.expiresAt_ttl"`);
 }
 
 async function ensureBeliefsCompoundIndex(db: Db): Promise<void> {
@@ -117,10 +132,12 @@ export async function setupIndexes(): Promise<void> {
   await ensureCollection(db, BELIEFS);
   await ensureCollection(db, BRIEFS);
   await ensureCollection(db, LOCKS);
+  await ensureCollection(db, DROPPED_CANDIDATES);
 
   await ensureTtlIndex(db);
   await ensureBeliefsCompoundIndex(db);
   await ensureBeliefsTtlIndex(db);
+  await ensureDroppedCandidatesTtlIndex(db);
 
   if (config.embeddingMode === "appside") {
     await ensureSearchIndex(db, BELIEFS, "beliefs_vec", "vectorSearch", {

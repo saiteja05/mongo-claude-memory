@@ -25,14 +25,28 @@ export interface Config {
   bedrockRegion: string;
   ollamaBaseUrl: string;
   ollamaModel: string;
+  // Sized to Ollama's own num_ctx request option (llm/ollama.ts), since
+  // Ollama has no fixed context window of its own the way Anthropic/Bedrock
+  // do; also feeds llm/contextWindow.ts's model-aware batch-size default.
+  ollamaContextTokens: number;
   leaseMs: number;
   claimBatchSize: number;
-  consolidationBatchMaxChars: number;
+  // Undefined when unset (or garbage): consolidation/cli.ts then resolves the
+  // actual budget from the configured model's context window
+  // (llm/contextWindow.ts's computeBatchMaxCharsDefault), rather than one
+  // fixed default regardless of provider. An explicit override always wins.
+  consolidationBatchMaxChars: number | undefined;
   reclaimAfterMs: number;
   beliefsContextLimit: number;
   dedupeSimilarityThreshold: number;
   reconcileSimilarityThreshold: number;
   reconcileMaxPairs: number;
+  // Circuit breaker: when this many single-observation extractions fail
+  // non-retryably in a row within one run, the run aborts on the assumption
+  // of a global provider problem (invalid credentials, quota exhaustion)
+  // rather than continuing to brand the whole queue failed one observation
+  // at a time.
+  maxConsecutiveTerminalExtractionFailures: number;
   embeddingMode: "appside" | "auto";
   rerankMode: "auto" | "native" | "appside";
 }
@@ -44,6 +58,18 @@ function envInt(name: string, fallback: number, opts?: { min?: number }): number
   if (!Number.isFinite(parsed)) return fallback;
   if (opts?.min !== undefined && parsed < opts.min) return fallback;
   return parsed;
+}
+
+// Unlike envInt, an unset or non-numeric value here yields undefined rather
+// than a fixed fallback: callers that need model-aware behavior when this is
+// left unset (consolidationBatchMaxChars) tell "unset" apart from "explicitly
+// set to some number" this way. An explicit value is still returned as-is
+// with no min bound, matching this field's pre-existing lack of one.
+function envIntOptional(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function envFloat(
@@ -134,12 +160,19 @@ export function loadConfig(): Config {
       ""
     ),
     ollamaModel: process.env.OLLAMA_MODEL || "llama3.1",
+    // Ollama's own request-time context size (llm/ollama.ts's num_ctx); also
+    // read by llm/contextWindow.ts to size the extraction batch for it.
+    ollamaContextTokens: envInt("OLLAMA_CONTEXT_TOKENS", 8192, { min: 1024 }),
     leaseMs: envInt("CONSOLIDATION_LEASE_MS", 300000, { min: 1000 }),
     claimBatchSize: envInt("CONSOLIDATION_BATCH_SIZE", 50, { min: 1 }),
     // Character budget for one extraction batch. CONSOLIDATION_BATCH_SIZE
     // counts observations; transcript observations can be 50k chars each, so
-    // a count-only bound could build a prompt past the model's context limit.
-    consolidationBatchMaxChars: envInt("CONSOLIDATION_BATCH_MAX_CHARS", 300000),
+    // a count-only bound could build a prompt past the model's context
+    // limit. Left undefined when unset, so consolidation/cli.ts's
+    // resolveBatchMaxChars can fall back to a model-aware default
+    // (llm/contextWindow.ts) instead of one fixed number regardless of
+    // provider.
+    consolidationBatchMaxChars: envIntOptional("CONSOLIDATION_BATCH_MAX_CHARS"),
     reclaimAfterMs: envInt("CONSOLIDATION_RECLAIM_MS", 600000, { min: 1000 }),
     beliefsContextLimit: envInt("CONSOLIDATION_BELIEFS_CONTEXT_LIMIT", 30),
     dedupeSimilarityThreshold: envFloat("CONSOLIDATION_DEDUPE_THRESHOLD", 0.93, {
@@ -154,6 +187,15 @@ export function loadConfig(): Config {
     }),
     // Cap on LLM arbitration calls per --reconcile sweep.
     reconcileMaxPairs: envInt("CONSOLIDATION_RECONCILE_MAX_PAIRS", 25, { min: 1 }),
+    // Circuit breaker: when this many single-observation extractions fail
+    // non-retryably in a row within one run, the run aborts on the
+    // assumption of a global provider problem rather than continuing to
+    // brand the whole queue failed.
+    maxConsecutiveTerminalExtractionFailures: envInt(
+      "CONSOLIDATION_MAX_CONSECUTIVE_TERMINAL_FAILURES",
+      3,
+      { min: 1 }
+    ),
     // "auto" selects Atlas autoEmbed (the server computes and stores the
     // embedding from the "text" path, no app-side Voyage call); anything
     // else, including unset, keeps the appside (current) behavior.

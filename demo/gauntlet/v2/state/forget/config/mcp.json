@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mongo-claude-memory": {
+      "command": "node",
+      "args": [
+        "/Users/teja.boddapati/Desktop/mongo-claude-memory/dist/mcp/server.js"
+      ],
+      "env": {
+        "MEMORY_MONGODB_DB": "claude_memory_gauntlet_v2_forget"
+      }
+    }
+  },
+  "_passthroughEnvNote": "MDB_MCP_CONNECTION_STRING, MEMORY_MONGODB_URI, VOYAGE_API_KEY, VOYAGE_MODEL, VOYAGE_DIMENSIONS, VOYAGE_BASE_URL, RERANK_MODE, EMBEDDING_MODE are inherited from the claude process environment at spawn time (not set in this file)."
+}

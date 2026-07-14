@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+// NonRetryableLLMError is imported dynamically inside each test, after
+// vi.resetModules() runs in beforeEach: a static top-level import here would
+// bind to the module registry's pre-reset instance of src/llm/errors.ts,
+// which is a different class object (and so fails instanceof) than the one
+// anthropic.ts's own dynamic import transitively re-evaluates post-reset.
 
 const ENV_KEYS = [
   "MDB_MCP_CONNECTION_STRING",
@@ -78,6 +83,7 @@ describe("callWithTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { callWithTool } = await import("../src/llm/anthropic.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     const resultPromise = callWithTool(
       "system prompt",
       "user prompt",
@@ -96,24 +102,30 @@ describe("callWithTool", () => {
     } catch (err) {
       const message = (err as Error).message;
       expect(message).not.toContain(SECRET_API_KEY);
+      // Exhausting retries on a transient failure (a 500 every attempt) must
+      // stay a plain Error, not NonRetryableLLMError: consolidation's
+      // split-retry only splits a batch on a non-retryable classification,
+      // and splitting does nothing useful for a transient failure.
+      expect(err).not.toBeInstanceOf(NonRetryableLLMError);
     }
   });
 
-  it("does not retry a non-retryable 400 response", async () => {
+  it("does not retry a non-retryable 400 response, and classifies the final error as NonRetryableLLMError", async () => {
     const fetchMock = vi.fn(async () => fakeResponse(400, {}));
     vi.stubGlobal("fetch", fetchMock);
 
     const { callWithTool } = await import("../src/llm/anthropic.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     await expect(
       callWithTool("system prompt", "user prompt", "emit_result", {
         type: "object",
         properties: {},
       })
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a well-formed 200 response missing the expected tool_use block, without retrying", async () => {
+  it("rejects a well-formed 200 response missing the expected tool_use block, without retrying, classified as NonRetryableLLMError", async () => {
     const fetchMock = vi.fn(async () =>
       fakeResponse(200, {
         content: [{ type: "text", text: "no tool call here" }],
@@ -122,12 +134,13 @@ describe("callWithTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { callWithTool } = await import("../src/llm/anthropic.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     await expect(
       callWithTool("system prompt", "user prompt", "emit_result", {
         type: "object",
         properties: {},
       })
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -146,7 +159,7 @@ describe("callWithTool", () => {
     expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
-  it("throws a non-retryable error (single attempt) when the response stopped on max_tokens", async () => {
+  it("throws a non-retryable error (single attempt) when the response stopped on max_tokens, classified as NonRetryableLLMError", async () => {
     // The tool_use block is present but was truncated mid-output: consuming
     // it would silently lose facts, so the call must fail without retrying
     // (a retry would truncate identically).
@@ -161,12 +174,13 @@ describe("callWithTool", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { callWithTool } = await import("../src/llm/anthropic.js");
-    await expect(
-      callWithTool("system prompt", "user prompt", "emit_result", {
-        type: "object",
-        properties: {},
-      })
-    ).rejects.toThrow(/max_tokens.*reduce batch size/);
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
+    const resultPromise = callWithTool("system prompt", "user prompt", "emit_result", {
+      type: "object",
+      properties: {},
+    });
+    await expect(resultPromise).rejects.toThrow(/max_tokens.*reduce batch size/);
+    await expect(resultPromise).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

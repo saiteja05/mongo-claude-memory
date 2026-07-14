@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { BELIEFS as BELIEFS_NAME } from "../src/db/schema.js";
+import { BELIEFS as BELIEFS_NAME, DROPPED_CANDIDATES as DROPPED_CANDIDATES_NAME } from "../src/db/schema.js";
 
 let savedUri: string | undefined;
 let savedMdbUri: string | undefined;
@@ -103,8 +103,10 @@ describe("setupIndexes", () => {
     expect(calls).toContain("createCollection:beliefs");
     expect(calls).toContain("createCollection:briefs");
     expect(calls).toContain("createCollection:locks");
+    expect(calls).toContain("createCollection:dropped_candidates");
     expect(calls).toContain("createIndex:observations:expiresAt_ttl");
     expect(calls).toContain("createIndex:beliefs:project_scope_status");
+    expect(calls).toContain("createIndex:dropped_candidates:expiresAt_ttl");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_vec");
     expect(calls).not.toContain("createSearchIndex:beliefs:beliefs_vec_auto");
     expect(calls).toContain("createSearchIndex:beliefs:beliefs_text");
@@ -135,11 +137,12 @@ describe("setupIndexes", () => {
   it("is idempotent: skips creation for collections and indexes that already exist", async () => {
     const calls: string[] = [];
     const state: FakeState = {
-      existingCollections: new Set(["observations", "beliefs", "briefs", "locks"]),
+      existingCollections: new Set(["observations", "beliefs", "briefs", "locks", "dropped_candidates"]),
       existingIndexNames: new Set([
         "observations:expiresAt_ttl",
         "beliefs:project_scope_status",
         "beliefs:archived_tombstoned_ttl",
+        "dropped_candidates:expiresAt_ttl",
       ]),
       existingSearchIndexNames: new Set([
         "beliefs:beliefs_vec",
@@ -223,6 +226,71 @@ describe("setupIndexes", () => {
     await setupIndexes();
 
     expect(calls).not.toContain("createIndex:beliefs:archived_tombstoned_ttl");
+  });
+
+  it("creates the dropped_candidates TTL index with expireAfterSeconds 0 when it does not already exist", async () => {
+    const calls: string[] = [];
+    const state: FakeState = {
+      existingCollections: new Set(["observations", "beliefs", "briefs", "locks", "dropped_candidates"]),
+      existingIndexNames: new Set([
+        "observations:expiresAt_ttl",
+        "beliefs:project_scope_status",
+        "beliefs:archived_tombstoned_ttl",
+      ]),
+      existingSearchIndexNames: new Set(["beliefs:beliefs_vec", "beliefs:beliefs_text"]),
+      searchIndexesUnsupported: false,
+    };
+    const createIndexCalls: Array<{ keys: unknown; options: unknown }> = [];
+    const db = makeFakeDb(state, calls);
+    const droppedCollection = db.collection(DROPPED_CANDIDATES_NAME);
+    const originalCreateIndex = droppedCollection.createIndex.bind(droppedCollection);
+    droppedCollection.createIndex = async (keys: unknown, options: { name: string }) => {
+      createIndexCalls.push({ keys, options });
+      return originalCreateIndex(keys, options);
+    };
+    vi.doMock("../src/db/client.js", () => ({
+      getDb: async () => ({
+        ...db,
+        collection: (name: string) =>
+          name === DROPPED_CANDIDATES_NAME ? droppedCollection : db.collection(name),
+      }),
+      closeDb: async () => {},
+    }));
+
+    const { setupIndexes } = await import("../src/db/setupIndexes.js");
+    await setupIndexes();
+
+    expect(calls).toContain("createIndex:dropped_candidates:expiresAt_ttl");
+    const ttlCall = createIndexCalls.find(
+      (c) => (c.options as { name: string }).name === "expiresAt_ttl"
+    );
+    expect(ttlCall).toBeDefined();
+    expect(ttlCall?.keys).toEqual({ expiresAt: 1 });
+    expect(ttlCall?.options).toEqual({ name: "expiresAt_ttl", expireAfterSeconds: 0 });
+  });
+
+  it("skips creating the dropped_candidates TTL index when it already exists", async () => {
+    const calls: string[] = [];
+    const state: FakeState = {
+      existingCollections: new Set(["observations", "beliefs", "briefs", "locks", "dropped_candidates"]),
+      existingIndexNames: new Set([
+        "observations:expiresAt_ttl",
+        "beliefs:project_scope_status",
+        "beliefs:archived_tombstoned_ttl",
+        "dropped_candidates:expiresAt_ttl",
+      ]),
+      existingSearchIndexNames: new Set(["beliefs:beliefs_vec", "beliefs:beliefs_text"]),
+      searchIndexesUnsupported: false,
+    };
+    vi.doMock("../src/db/client.js", () => ({
+      getDb: async () => makeFakeDb(state, calls),
+      closeDb: async () => {},
+    }));
+
+    const { setupIndexes } = await import("../src/db/setupIndexes.js");
+    await setupIndexes();
+
+    expect(calls).not.toContain("createIndex:dropped_candidates:expiresAt_ttl");
   });
 
   it("treats a listSearchIndexes failure (non-Atlas deployment) as a clear skip, not a fatal error", async () => {

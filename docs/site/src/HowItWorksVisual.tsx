@@ -9,7 +9,6 @@ import {
   Search,
   ArrowRight,
   ArrowDown,
-  ExternalLink,
   Sparkles,
   Zap,
 } from 'lucide-react';
@@ -95,7 +94,7 @@ const STAGES: StageContent[] = [
       { op: 'briefs.replaceOne()', kind: 'compact' },
     ],
     external: [
-      { icon: Sparkles, label: 'Claude (Bedrock/Anthropic): extractFacts()' },
+      { icon: Sparkles, label: 'LLM (Anthropic/Bedrock/Ollama): extractFacts()' },
       { icon: Zap, label: 'Voyage AI: embed() (skipped when Atlas autoEmbed is on)' },
     ],
   },
@@ -632,18 +631,6 @@ function HowItWorksVisual() {
           </div>
         </>
       )}
-
-      <div className="flex items-center justify-center mt-8 sm:mt-10">
-        <a
-          href="https://github.com/saiteja05/mongo-claude-memory#architecture-overview"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-4 sm:mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-[#336443] hover:text-[#1f2a1d] transition-colors"
-        >
-          More info
-          <ExternalLink className="w-3.5 h-3.5" />
-        </a>
-      </div>
     </section>
   );
 }

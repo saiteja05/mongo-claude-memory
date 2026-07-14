@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+// NonRetryableLLMError is imported dynamically inside each test, after
+// vi.resetModules() runs in beforeEach: a static top-level import here would
+// bind to the module registry's pre-reset instance of src/llm/errors.ts,
+// which is a different class object (and so fails instanceof) than the one
+// bedrock.ts's own dynamic import transitively re-evaluates post-reset.
 
 const ENV_KEYS = [
   "MDB_MCP_CONNECTION_STRING",
@@ -132,6 +137,7 @@ describe("bedrock callWithTool", () => {
     });
 
     const { callWithTool } = await import("../src/llm/bedrock.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     const resultPromise = callWithTool(
       "system prompt",
       "user prompt",
@@ -143,51 +149,66 @@ describe("bedrock callWithTool", () => {
 
     await expect(resultPromise).rejects.toThrow();
     expect(sendMock).toHaveBeenCalledTimes(3);
+
+    try {
+      await resultPromise;
+      expect.unreachable("callWithTool should have thrown");
+    } catch (err) {
+      // Exhausting retries on a transient failure (a 500 InternalServerException
+      // every attempt) must stay a plain Error, not NonRetryableLLMError:
+      // consolidation's split-retry only splits a batch on a non-retryable
+      // classification, and splitting does nothing useful for a transient
+      // failure.
+      expect(err).not.toBeInstanceOf(NonRetryableLLMError);
+    }
   });
 
-  it("does not retry a non-retryable validation exception", async () => {
+  it("does not retry a non-retryable validation exception, and classifies the final error as NonRetryableLLMError", async () => {
     sendMock.mockImplementation(async () => {
       throw new FakeServiceException("ValidationException", 400);
     });
 
     const { callWithTool } = await import("../src/llm/bedrock.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     await expect(
       callWithTool("system prompt", "user prompt", "emit_result", {
         type: "object",
         properties: {},
       })
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a well-formed response missing the expected toolUse block, without retrying", async () => {
+  it("rejects a well-formed response missing the expected toolUse block, without retrying, classified as NonRetryableLLMError", async () => {
     sendMock.mockImplementation(async () => ({
       output: { message: { content: [{ text: "no tool call here" }] } },
     }));
 
     const { callWithTool } = await import("../src/llm/bedrock.js");
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
     await expect(
       callWithTool("system prompt", "user prompt", "emit_result", {
         type: "object",
         properties: {},
       })
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
-  it("throws a non-retryable error (single attempt) when the Converse response stopped on max_tokens", async () => {
+  it("throws a non-retryable error (single attempt) when the Converse response stopped on max_tokens, classified as NonRetryableLLMError", async () => {
     sendMock.mockImplementation(async () => ({
       stopReason: "max_tokens",
       ...toolUseResult("emit_result", { partial: true }),
     }));
 
     const { callWithTool } = await import("../src/llm/bedrock.js");
-    await expect(
-      callWithTool("system prompt", "user prompt", "emit_result", {
-        type: "object",
-        properties: {},
-      })
-    ).rejects.toThrow(/max_tokens.*reduce batch size/);
+    const { NonRetryableLLMError } = await import("../src/llm/errors.js");
+    const resultPromise = callWithTool("system prompt", "user prompt", "emit_result", {
+      type: "object",
+      properties: {},
+    });
+    await expect(resultPromise).rejects.toThrow(/max_tokens.*reduce batch size/);
+    await expect(resultPromise).rejects.toBeInstanceOf(NonRetryableLLMError);
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 

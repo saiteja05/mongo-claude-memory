@@ -5,6 +5,7 @@ export const OBSERVATIONS = "observations";
 export const BELIEFS = "beliefs";
 export const BRIEFS = "briefs";
 export const LOCKS = "locks";
+export const DROPPED_CANDIDATES = "dropped_candidates";
 
 export type ObservationSource =
   | "transcript"
@@ -14,7 +15,7 @@ export type ObservationSource =
 
 export type ObservationPriority = "normal" | "high";
 
-export type ObservationStatus = "pending" | "claimed" | "consolidated";
+export type ObservationStatus = "pending" | "claimed" | "consolidated" | "failed";
 
 export interface Observation {
   _id?: string;
@@ -30,6 +31,14 @@ export interface Observation {
   expiresAt?: Date; // TTL target; unset for high-priority user captures
   chunk_index?: number; // consecutive slices of one session transcript, 0-based index
   chunk_count?: number; // total number of chunks in this session's capture
+  // Set together when a single observation is the one a non-retryable LLM
+  // failure keeps recurring on (extractFacts.terminal in consolidation/run.ts):
+  // "failed" is a terminal status, excluded from reclaimStale/findPendingProjects,
+  // so it is never retried forever. failure_reason is the error NAME only
+  // (e.g. "NonRetryableLLMError"), never err.message, since driver/provider
+  // error messages can embed connection strings or other secret-bearing detail.
+  failed_at?: Date;
+  failure_reason?: string;
 }
 
 export type BeliefScope = "core" | "project" | "archive";
@@ -86,4 +95,26 @@ export interface Lock {
   _id: string; // e.g. "consolidate:" + project
   holder: string; // run_id of the current lease holder
   heldUntil: Date;
+}
+
+// Quarantine for candidate facts dropped by the deny-list validator
+// (validateCandidateFact) or the LLM injection classifier (classifyInjection)
+// during consolidation (run.ts), so a false-positive drop is recoverable and
+// observable instead of vanishing with only an 80-char stderr line and its
+// source observations left marked consolidated. TTL-bounded via
+// config.droppedCandidateTtlDays (see setupIndexes.ts's expiresAt_ttl index
+// on this collection).
+export interface DroppedCandidate {
+  _id?: string;
+  project: string; // repo key; "global" allowed, matching Observation/Belief
+  run_id: string; // the consolidation run that dropped this candidate
+  stage: "deny-list" | "classifier"; // which check dropped it
+  reason: string; // truncated to 500 chars at write time (quarantine.ts)
+  text: string; // the FULL candidate text, kept recoverable, never truncated
+  type?: string;
+  scope?: string;
+  importance?: number;
+  observation_ids: string[]; // provenance: source observations
+  created_at: Date;
+  expiresAt: Date; // TTL target; see setupIndexes.ts's expiresAt_ttl index
 }

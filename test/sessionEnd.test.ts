@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   captureSessionEnd,
   captureSessionEndWithTimeout,
@@ -24,6 +27,32 @@ const baseInput: SessionEndInput = {
 // Budget large enough that basic (short-transcript) tests never hit the
 // chunk-dropping path; derivation itself is covered by its own tests below.
 const AMPLE_BUDGET = 500000;
+
+// captureSessionEnd's catch and captureSessionEndWithTimeout's telemetry both
+// call appendFailure, which otherwise defaults to writing under the real
+// ~/.mongo-claude-memory; point it at a scratch file for every test in this
+// file so none of them ever touch that (same approach as sessionStart.test.ts).
+let savedFailureLog: string | undefined;
+let failureLogFile: string;
+
+beforeEach(() => {
+  savedFailureLog = process.env.MEMORY_FAILURE_LOG;
+  failureLogFile = path.join(
+    mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-sessionend-")),
+    "failures.log"
+  );
+  process.env.MEMORY_FAILURE_LOG = failureLogFile;
+});
+
+afterEach(() => {
+  if (savedFailureLog === undefined) delete process.env.MEMORY_FAILURE_LOG;
+  else process.env.MEMORY_FAILURE_LOG = savedFailureLog;
+});
+
+function readFailureLines(): string[] {
+  if (!existsSync(failureLogFile)) return [];
+  return readFileSync(failureLogFile, "utf8").trim().split("\n").filter(Boolean);
+}
 
 describe("captureSessionEnd", () => {
   it("writes one chunk observation via writeObservations when transcript content is present", async () => {
@@ -63,8 +92,10 @@ describe("captureSessionEnd", () => {
     expect(writeObservations).not.toHaveBeenCalled();
   });
 
-  it("fails open (never throws) when writeObservations rejects", async () => {
-    const writeObservations = vi.fn().mockRejectedValue(new Error("mongo is down"));
+  it("fails open (never throws) when writeObservations rejects, and logs sessionEnd.captureError with the error's name only", async () => {
+    const err = new Error("mongo is down");
+    err.name = "MongoServerError";
+    const writeObservations = vi.fn().mockRejectedValue(err);
 
     await expect(
       captureSessionEnd(baseInput, {
@@ -74,9 +105,15 @@ describe("captureSessionEnd", () => {
         writeObservations,
       })
     ).resolves.toBeUndefined();
+
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ sessionEnd\.captureError MongoServerError$/);
+    // Name only, never the message: a driver message can embed connection details.
+    expect(lines[0]).not.toContain("mongo is down");
   });
 
-  it("fails open (never throws) when readTranscript rejects, simulating a hang/timeout upstream", async () => {
+  it("fails open (never throws) when readTranscript rejects, simulating a hang/timeout upstream, and logs sessionEnd.captureError", async () => {
     const writeObservations = vi.fn().mockResolvedValue(["id-1"]);
 
     await expect(
@@ -90,9 +127,15 @@ describe("captureSessionEnd", () => {
       })
     ).resolves.toBeUndefined();
     expect(writeObservations).not.toHaveBeenCalled();
-  });
 
-  it("fails open when the body exceeds the timeout budget (simulated hang)", async () => {
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ sessionEnd\.captureError Error$/);
+  });
+});
+
+describe("captureSessionEndWithTimeout", () => {
+  it("returns outcome timeout and logs sessionEnd.timeout with a CaptureTimeout reason when the body exceeds the timeout budget, without abandoning the write", async () => {
     vi.useFakeTimers();
     const writeObservations = vi.fn().mockResolvedValue(["id-1"]);
 
@@ -108,8 +151,144 @@ describe("captureSessionEnd", () => {
     );
 
     await vi.advanceTimersByTimeAsync(1000);
-    await expect(resultPromise).resolves.toBeUndefined();
+    const result = await resultPromise;
+
+    expect(result.outcome).toBe("timeout");
+    expect(result.pendingWrite).not.toBeNull();
     expect(writeObservations).not.toHaveBeenCalled();
+
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ sessionEnd\.timeout CaptureTimeout$/);
+  });
+
+  it("produces outcome completed, a null pendingWrite, and no new telemetry on the normal (non-timeout) fast path", async () => {
+    const writeObservations = vi.fn().mockResolvedValue(["id-1"]);
+
+    const result = await captureSessionEndWithTimeout(
+      baseInput,
+      {
+        readTranscript: async () => "some transcript tail content",
+        getProjectKey: () => "myrepo-abc123",
+        transcriptCaptureMaxChars: AMPLE_BUDGET,
+        writeObservations,
+      },
+      5000
+    );
+
+    expect(result).toEqual({ outcome: "completed", pendingWrite: null });
+    expect(writeObservations).toHaveBeenCalledTimes(1);
+    expect(readFailureLines()).toHaveLength(0);
+  });
+
+  it("still logs sessionEnd.captureError (not a timeout) when the write rejects before the timeout, on the fast path", async () => {
+    const err = new Error("mongo is down");
+    err.name = "MongoServerError";
+    const writeObservations = vi.fn().mockRejectedValue(err);
+
+    const result = await captureSessionEndWithTimeout(
+      baseInput,
+      {
+        readTranscript: async () => "some content",
+        getProjectKey: () => "myrepo-abc123",
+        transcriptCaptureMaxChars: AMPLE_BUDGET,
+        writeObservations,
+      },
+      5000
+    );
+
+    expect(result).toEqual({ outcome: "completed", pendingWrite: null });
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ sessionEnd\.captureError MongoServerError$/);
+  });
+
+  it("awaits the pending write's real settlement before a simulated main()-style finally may run closeDb, and logs lateCapture once it lands", async () => {
+    vi.useFakeTimers();
+    let resolveWrite: (value: unknown) => void = () => {};
+    const writeObservations = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveWrite = resolve;
+        })
+    );
+
+    const resultPromise = captureSessionEndWithTimeout(
+      baseInput,
+      {
+        readTranscript: async () => "some transcript tail content",
+        getProjectKey: () => "myrepo-abc123",
+        transcriptCaptureMaxChars: AMPLE_BUDGET,
+        writeObservations,
+      },
+      1000
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await resultPromise;
+    expect(result.outcome).toBe("timeout");
+    expect(result.pendingWrite).not.toBeNull();
+
+    // Reproduces main()'s finally block exactly: await the pending write (if
+    // any) before running closeDb, so a slow-but-successful insert is never
+    // severed by connection teardown.
+    const closeDbSpy = vi.fn();
+    const order: string[] = [];
+    const finallyPromise = (async () => {
+      if (result.pendingWrite) await result.pendingWrite;
+      order.push("closeDb");
+      closeDbSpy();
+    })();
+
+    // The write has not resolved yet: closeDb must not have run.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(closeDbSpy).not.toHaveBeenCalled();
+
+    resolveWrite(["id-1"]);
+    await finallyPromise;
+
+    expect(order).toEqual(["closeDb"]);
+    expect(closeDbSpy).toHaveBeenCalledTimes(1);
+
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/ sessionEnd\.timeout CaptureTimeout$/);
+    expect(lines[1]).toMatch(/ sessionEnd\.lateCapture CaptureLandedLate$/);
+  });
+
+  it("swallows a write that rejects after the timeout: pendingWrite still resolves cleanly, no unhandled rejection, hook can exit", async () => {
+    vi.useFakeTimers();
+    const writeObservations = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error("mongo is down")), 5000);
+        })
+    );
+
+    const resultPromise = captureSessionEndWithTimeout(
+      baseInput,
+      {
+        readTranscript: async () => "some transcript tail content",
+        getProjectKey: () => "myrepo-abc123",
+        transcriptCaptureMaxChars: AMPLE_BUDGET,
+        writeObservations,
+      },
+      1000
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await resultPromise;
+    expect(result.outcome).toBe("timeout");
+    expect(result.pendingWrite).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(result.pendingWrite!).resolves.toBeUndefined();
+
+    const lines = readFailureLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/ sessionEnd\.timeout CaptureTimeout$/);
+    expect(lines[1]).toMatch(/ sessionEnd\.captureError Error$/);
   });
 });
 

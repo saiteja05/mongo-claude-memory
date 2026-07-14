@@ -1,4 +1,5 @@
 import { loadConfig } from "../config.js";
+import { NonRetryableLLMError, isNonRetryableLLMError } from "./errors.js";
 
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 300;
@@ -26,8 +27,6 @@ function sleep(ms: number): Promise<void> {
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
-
-class NonRetryableOllamaError extends Error {}
 
 /**
  * Ollama counterpart to src/llm/anthropic.ts's callWithTool, talking to a
@@ -65,7 +64,12 @@ export async function callWithTool(
       },
     ],
     stream: false,
-    options: { num_predict: MAX_TOKENS },
+    // num_ctx sizes the model's own context window for this request. Without
+    // it Ollama falls back to its default (often 2048-4096), which silently
+    // truncates the prompt rather than erroring, so an extraction batch
+    // sized for a larger context (see llm/contextWindow.ts) would otherwise
+    // lose the tail of its input with no signal that anything was dropped.
+    options: { num_predict: MAX_TOKENS, num_ctx: config.ollamaContextTokens },
   });
 
   let lastError: unknown;
@@ -89,7 +93,7 @@ export async function callWithTool(
 
       if (!response.ok) {
         if (!isRetryableStatus(response.status)) {
-          throw new NonRetryableOllamaError(
+          throw new NonRetryableLLMError(
             `Ollama chat request failed with non-retryable status ${response.status}`
           );
         }
@@ -107,7 +111,7 @@ export async function callWithTool(
       // non-retryably (a retry would truncate identically) so the batch
       // stays claimed and reclaimable.
       if (json.done_reason === "length") {
-        throw new NonRetryableOllamaError(
+        throw new NonRetryableLLMError(
           "extraction output truncated; reduce batch size"
         );
       }
@@ -117,7 +121,7 @@ export async function callWithTool(
       );
 
       if (!toolCall) {
-        throw new NonRetryableOllamaError(
+        throw new NonRetryableLLMError(
           `Ollama response did not include a tool call for "${toolName}"`
         );
       }
@@ -126,7 +130,7 @@ export async function callWithTool(
       return typeof args === "string" ? JSON.parse(args) : args;
     } catch (err) {
       lastError = err;
-      if (err instanceof NonRetryableOllamaError) {
+      if (isNonRetryableLLMError(err)) {
         break;
       }
       if (attempt < MAX_ATTEMPTS) {
@@ -147,5 +151,7 @@ export async function callWithTool(
   }
 
   const reason = lastError instanceof Error ? lastError.message : "unknown error";
-  throw new Error(`Ollama chat call failed after ${MAX_ATTEMPTS} attempts: ${reason}`);
+  const message = `Ollama chat call failed after ${MAX_ATTEMPTS} attempts: ${reason}`;
+  // Classification-preserving, matching anthropic.ts's final wrap.
+  throw isNonRetryableLLMError(lastError) ? new NonRetryableLLMError(message) : new Error(message);
 }

@@ -1,5 +1,5 @@
 import type { Db, Document } from "mongodb";
-import { BELIEFS, BRIEFS, LOCKS, OBSERVATIONS } from "../db/schema.js";
+import { BELIEFS, BRIEFS, DROPPED_CANDIDATES, LOCKS, OBSERVATIONS } from "../db/schema.js";
 
 const LOCK_PROJECT_PREFIX = "consolidate:";
 
@@ -9,6 +9,7 @@ export interface StatusReport {
   locks: Array<{ project: string; holder: string; heldUntil: Date; live: boolean }>;
   beliefCounts: Array<{ project: string; status: string; count: number }>;
   briefs: Array<{ id: string; tokenEstimate: number; beliefCount: number; generation: number; generatedAt: Date }>;
+  droppedCandidates: Array<{ project: string; stage: string; count: number }>;
 }
 
 interface GroupedCount {
@@ -24,6 +25,19 @@ function groupByProjectStatus(docs: GroupedCount[]): Array<{ project: string; st
   }));
 }
 
+interface GroupedStageCount {
+  _id: { project?: unknown; stage?: unknown };
+  count: number;
+}
+
+function groupByProjectStage(docs: GroupedStageCount[]): Array<{ project: string; stage: string; count: number }> {
+  return docs.map((doc) => ({
+    project: String(doc._id?.project ?? ""),
+    stage: String(doc._id?.stage ?? ""),
+    count: doc.count,
+  }));
+}
+
 function lockProjectLabel(id: unknown): string {
   const raw = String(id);
   return raw.startsWith(LOCK_PROJECT_PREFIX) ? raw.slice(LOCK_PROJECT_PREFIX.length) : raw;
@@ -32,9 +46,10 @@ function lockProjectLabel(id: unknown): string {
 /**
  * Read-only point-in-time snapshot of the consolidation system's state:
  * observation and belief counts by project/status, stale claim count,
- * current lock state, and brief metadata. Never mutates anything, including
- * the stale-claim count (unlike claim.ts's reclaimStale, which is the
- * mutating counterpart of this same staleness check).
+ * current lock state, brief metadata, and quarantined dropped-candidate
+ * counts by project/stage. Never mutates anything, including the
+ * stale-claim count (unlike claim.ts's reclaimStale, which is the mutating
+ * counterpart of this same staleness check).
  */
 export async function getStatusReport(db: Db, reclaimAfterMs: number): Promise<StatusReport> {
   const now = new Date();
@@ -75,7 +90,13 @@ export async function getStatusReport(db: Db, reclaimAfterMs: number): Promise<S
     generatedAt: doc.generated_at as Date,
   }));
 
-  return { observationCounts, staleClaimCount, locks, beliefCounts, briefs };
+  const droppedCandidatesRaw = (await db
+    .collection<Document>(DROPPED_CANDIDATES)
+    .aggregate([{ $group: { _id: { project: "$project", stage: "$stage" }, count: { $sum: 1 } } }])
+    .toArray()) as unknown as GroupedStageCount[];
+  const droppedCandidates = groupByProjectStage(droppedCandidatesRaw);
+
+  return { observationCounts, staleClaimCount, locks, beliefCounts, briefs, droppedCandidates };
 }
 
 /**
@@ -98,6 +119,11 @@ export function formatStatusReport(report: StatusReport): string {
   }
   lines.push(`Stale claims (past reclaim threshold, not yet reclaimed): ${report.staleClaimCount}`);
 
+  const failedObservationCount = report.observationCounts
+    .filter((row) => row.status === "failed")
+    .reduce((sum, row) => sum + row.count, 0);
+  lines.push(`Failed observations (terminal, will not retry): ${failedObservationCount}`);
+
   lines.push("Locks:");
   if (report.locks.length === 0) {
     lines.push("  (none)");
@@ -116,6 +142,15 @@ export function formatStatusReport(report: StatusReport): string {
   } else {
     for (const row of report.beliefCounts) {
       lines.push(`  - project="${row.project}", status=${row.status}: ${row.count}`);
+    }
+  }
+
+  lines.push("Dropped candidates (quarantined, TTL-bounded):");
+  if (report.droppedCandidates.length === 0) {
+    lines.push("  (none)");
+  } else {
+    for (const row of report.droppedCandidates) {
+      lines.push(`  - project="${row.project}", stage=${row.stage}: ${row.count}`);
     }
   }
 
