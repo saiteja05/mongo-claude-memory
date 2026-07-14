@@ -46,13 +46,13 @@ type Stat = {
 
 const RECALL_STATS: Stat[] = [
   { value: '8%', label: 'No memory' },
-  { value: '42%', label: "Claude's own memory" },
-  { value: '92%', label: 'This engine', accent: true },
+  { value: '58%', label: "Claude's own memory" },
+  { value: '75%', label: 'This engine', accent: true },
 ];
 
 const CAPTURE_STATS: Stat[] = [
-  { value: '42%', label: "Claude's own memory" },
-  { value: '83%', label: 'This engine', accent: true },
+  { value: '58%', label: "Claude's own memory" },
+  { value: '92%', label: 'This engine', accent: true },
 ];
 
 const HEADING_FONT =
