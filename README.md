@@ -581,7 +581,7 @@ The test suite (541 tests across the hooks, capture, consolidation, embeddings, 
 
 ## Benchmarking (the memory gauntlet)
 
-`demo/gauntlet/` holds a reproducible recall benchmark comparing this engine against Claude Code's native memory and against a memoryless baseline. This section explains what the benchmark measures and how it guards against the ways a self-run recall benchmark can quietly mislead itself. For the exact commands, the environment variable table, and the full integrity guarantees, see `demo/gauntlet/README.md`.
+`demo/gauntlet/` holds a reproducible recall benchmark comparing this engine against Claude Code's native memory and against a memoryless baseline. This section explains what the benchmark measures, how to run it, and how it guards against the ways a self-run recall benchmark can quietly mislead itself. `demo/gauntlet/README.md` has the exhaustive version: permissions, isolation guarantees, and every environment variable.
 
 ### Why a benchmark
 
@@ -611,7 +611,30 @@ Each run moves through the same stages, in order:
 7. **Grade and adjudicate.** Keyword-grade the raw answers, run the blinded LLM judge cross-check, have a human review its disagreements, and re-grade with any accepted overrides merged in.
 8. **Report.** Render the final `REPORT.md`.
 
-See `demo/gauntlet/README.md` for the exact command behind each stage and the full provenance and resume rules.
+The exact commands, run in order:
+
+```bash
+node demo/gauntlet/reset.mjs --yes             # start clean: drops all three gauntlet databases and state/
+
+node demo/gauntlet/setup.mjs                   # create all four arms' config/workspace, mint a run id, check env
+node demo/gauntlet/ensure-indexes.mjs          # recreate and wait for both engine arms' Atlas search indexes
+node demo/gauntlet/seed.mjs                    # run the 5-session, 14-turn seed corpus against stock, engine, engine-native
+
+# Consolidate, repeating until every engine-arm database reports fully drained:
+until node demo/gauntlet/consolidate.mjs | grep -q "all engine-arm databases drained"; do sleep 5; done
+
+node demo/gauntlet/capture-check.mjs           # measure capture rate per arm/store (no LLM calls)
+node demo/gauntlet/recall.mjs                  # ask the 12 recall questions, 2 trials each, all four arms
+node demo/gauntlet/grade.mjs                   # grade raw + adjudicated (adjudications.json), write state/results.json
+node demo/gauntlet/judge.mjs                   # blinded LLM adjudicator, writes adjudications-judge.json (disagreements only)
+
+# Review demo/gauntlet/adjudications-judge.json by hand; merge accepted entries into demo/gauntlet/adjudications.json
+node demo/gauntlet/grade.mjs                   # re-grade with the reviewed adjudications merged in
+
+node demo/gauntlet/report.mjs --date YYYY-MM-DD   # render REPORT.md
+```
+
+A run id is minted once by `setup.mjs` and threaded through every downstream artifact: `grade.mjs` and `report.mjs` hard-error if any artifact's run id disagrees, so state from two different runs can never be merged into one report. `recall.mjs` refuses to append to an existing `answers.jsonl` unless `GAUNTLET_RESUME=1` is set, so a crashed run can resume without duplicating trials; to start an arm over from scratch, run `reset.mjs --yes` first.
 
 ### Grading and adjudication
 
@@ -651,4 +674,17 @@ See `demo/gauntlet/REPORT.md` (gitignored and local-only) for the full per-fact 
 
 ### Running it yourself
 
-Benchmark facts and results (`facts.json`, `REPORT.md`, adjudications, run state) are gitignored and local-only: a fresh clone needs `facts.json` supplied by the maintainer before any gauntlet script can run. See `demo/gauntlet/README.md` for the full run order, environment variable table, and integrity guarantees.
+Prerequisites: Node.js 20+, the `claude` CLI on PATH, this repo built (`npm run build`), a MongoDB Atlas cluster for the two engine arms, and an embedding provider plus an LLM provider for the consolidator and `judge.mjs`. Benchmark facts and results (`facts.json`, `REPORT.md`, adjudications, run state) are gitignored and local-only: a fresh clone needs `facts.json` supplied by the maintainer before any gauntlet script can run.
+
+The environment variables that matter most:
+
+| Variable | Needed for |
+|---|---|
+| `MDB_MCP_CONNECTION_STRING` or `MEMORY_MONGODB_URI` | every stage that touches Atlas: hooks/MCP, `ensure-indexes`, `consolidate`, `capture-check`, `recall`, `grade`, `reset` |
+| `VOYAGE_API_KEY` | `consolidate` (embeddings), engine-arm recall (`memory_search`) |
+| `ANTHROPIC_API_KEY` (`LLM_PROVIDER=anthropic`, default), AWS credentials (`LLM_PROVIDER=bedrock`), or a local Ollama server (`LLM_PROVIDER=ollama`) | `consolidate` (fact extraction), `judge.mjs` (adjudication) |
+| `GAUNTLET_MODEL` (optional) | pins the model for every seed and recall call; default is the rolling alias `claude-sonnet-5`. Pin a dated snapshot instead for any run whose numbers will be published or compared over time |
+| `GAUNTLET_TURN_TIMEOUT_MS` (optional) | per-call timeout for seed/recall, default 180000 |
+| `GAUNTLET_RESUME` (optional) | `1` lets `recall.mjs` resume into an existing `answers.jsonl` without duplicating trials |
+
+None of these scripts touch `claude_memory`, the real memory database: `reset.mjs` refuses to run if any resolved database name doesn't contain `gauntlet`. See `demo/gauntlet/README.md` for the complete variable table, permissions, and isolation guarantees.

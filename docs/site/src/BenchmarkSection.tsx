@@ -11,27 +11,48 @@ const BENCHMARK_LINKS: BenchmarkLink[] = [
   {
     icon: FlaskConical,
     title: 'How the benchmark works',
-    description: 'The full setup: fixed scenarios, isolated test arms, and how each run is scored end to end.',
+    description:
+      'Five seeded conversations about a fictional payments service, then 12 follow-up questions days later with no shared history. Each arm runs in its own isolated config directory and, for the engine arms, its own database.',
     href: 'https://github.com/saiteja05/mongo-claude-memory#benchmarking-the-memory-gauntlet',
   },
   {
     icon: Split,
     title: 'The four arms',
-    description: "What each arm gets, from this engine down to no memory at all, laid out side by side.",
+    description:
+      "No memory at all (the guessability floor), Claude Code's own CLAUDE.md and auto-memory, this engine alone, and both running together, the realistic day to day setup for most users.",
     href: 'https://github.com/saiteja05/mongo-claude-memory#the-four-arms',
   },
   {
     icon: Gavel,
     title: 'Grading and adjudication',
-    description: 'How keyword grading and a blinded LLM judge score each answer, and what happens when they disagree.',
+    description:
+      'Word-boundary keyword matching grades every answer first. A blinded LLM judge that never learns which arm produced an answer reviews disagreements before any override is applied.',
     href: 'https://github.com/saiteja05/mongo-claude-memory#grading-and-adjudication',
   },
   {
     icon: BarChart3,
     title: 'Latest results',
-    description: 'The most recent published run: recall by arm, plus a link to the raw adjudication data.',
+    description:
+      'Full per-fact breakdown, confidence intervals, and the raw adjudication data behind the numbers above, from the most recent run that cleared blinded judge review.',
     href: 'https://github.com/saiteja05/mongo-claude-memory#latest-results',
   },
+];
+
+type Stat = {
+  value: string;
+  label: string;
+  accent?: boolean;
+};
+
+const RECALL_STATS: Stat[] = [
+  { value: '8%', label: 'No memory' },
+  { value: '42%', label: "Claude's own memory" },
+  { value: '92%', label: 'This engine', accent: true },
+];
+
+const CAPTURE_STATS: Stat[] = [
+  { value: '42%', label: "Claude's own memory" },
+  { value: '83%', label: 'This engine', accent: true },
 ];
 
 const HEADING_FONT =
@@ -58,6 +79,27 @@ function BenchmarkLinkCard({ icon: Icon, title, description, href }: BenchmarkLi
   );
 }
 
+function StatChip({ value, label, accent }: Stat) {
+  return (
+    <div
+      className={
+        accent
+          ? 'flex flex-col items-center gap-1 rounded-2xl border-2 bg-white/90 px-3 py-4 sm:py-5'
+          : 'flex flex-col items-center gap-1 rounded-2xl border border-white/60 bg-white/70 px-3 py-4 sm:py-5'
+      }
+      style={accent ? { borderColor: '#00684A', boxShadow: '0 0 0 1px #00684A22' } : undefined}
+    >
+      <span
+        className={accent ? 'text-3xl sm:text-4xl font-normal text-[#00684A]' : 'text-3xl sm:text-4xl font-normal text-[#4b5b47]'}
+        style={{ fontFamily: HEADING_FONT }}
+      >
+        {value}
+      </span>
+      <span className="text-xs sm:text-sm font-medium text-[#4b5b47]/80 text-center">{label}</span>
+    </div>
+  );
+}
+
 function BenchmarkSection() {
   return (
     <section id="benchmark" className="relative w-full bg-[#f7f5ef] py-16 sm:py-20 md:py-28 px-4 sm:px-6 overflow-hidden">
@@ -78,6 +120,28 @@ function BenchmarkSection() {
           LLM judge that never learns which arm produced it, keeping the grading independent of the system being
           tested.
         </p>
+      </div>
+
+      <div className="max-w-3xl mx-auto mb-10 sm:mb-12">
+        <div className="grid grid-cols-3 gap-3 sm:gap-4">
+          {RECALL_STATS.map((stat) => (
+            <StatChip key={stat.label} {...stat} />
+          ))}
+        </div>
+        <p className="mt-4 sm:mt-5 text-center text-xs sm:text-sm text-[#4b5b47]/80 leading-relaxed">
+          Recall: asked again later, in a fresh session with no shared history, how often Claude answered correctly.
+        </p>
+
+        <div className="mt-8 pt-6 border-t border-[#4b5b47]/15">
+          <div className="flex items-center justify-center gap-3 sm:gap-4">
+            {CAPTURE_STATS.map((stat) => (
+              <StatChip key={stat.label} {...stat} />
+            ))}
+          </div>
+          <p className="mt-3 text-center text-xs sm:text-sm text-[#4b5b47]/70">
+            Capture: whether the fact got saved anywhere at all, before recall is even tested. This engine leads on both.
+          </p>
+        </div>
       </div>
 
       <div className="max-w-5xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
