@@ -49,9 +49,9 @@ type CollectionChip = {
 };
 
 const COLLECTIONS: CollectionChip[] = [
-  { icon: Database, color: '#85AB8B', name: 'observations', caption: 'Notes land here first, the moment they happen.' },
-  { icon: Sparkles, color: '#336443', name: 'beliefs', caption: 'The facts worth keeping, sorted and saved for good.' },
-  { icon: FileText, color: '#00684A', name: 'briefs', caption: 'The short summary Claude actually reads.' },
+  { icon: Database, color: '#85AB8B', name: 'observations', caption: 'Raw notes land here the instant something happens.' },
+  { icon: Sparkles, color: '#336443', name: 'beliefs', caption: 'The offline consolidator turns them into a durable, deduplicated fact.' },
+  { icon: FileText, color: '#00684A', name: 'briefs', caption: 'Compiled into the short, ranked summary Claude actually reads.' },
   { icon: Lock, color: '#4b5b47', name: 'locks', caption: 'Makes sure cleanup never runs twice at once.', muted: true },
 ];
 
@@ -137,7 +137,9 @@ function ArchitectureSection() {
           Three doors in. Four collections. One cluster.
         </h2>
         <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
-          Claude Code only ever reaches memory through three doors: hooks, a slash command, and an MCP server.
+          Claude Code only ever reaches memory through three doors: hooks, a slash command, and an MCP server. Inside
+          the cluster, an observation becomes a belief, and a belief becomes the brief that gets handed back at the
+          next session start.
         </p>
         <a
           href="https://github.com/saiteja05/mongo-claude-memory#architecture-overview"
@@ -185,15 +187,50 @@ function ArchitectureSection() {
           >
             MongoDB Atlas
           </h3>
-          <div className="grid grid-cols-2 gap-3 mt-4">
-            {COLLECTIONS.map((c, i) => (
-              <motion.div key={c.name} {...revealProps(i * 0.07)}>
-                <CollectionChipCard {...c} />
-              </motion.div>
-            ))}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mt-4">
+            <motion.div className="flex-1 min-w-0" {...revealProps(0)}>
+              <CollectionChipCard {...COLLECTIONS[0]} />
+            </motion.div>
+            <ArrowRight className="hidden sm:block w-4 h-4 shrink-0" style={{ color: '#00684A' }} />
+            <ArrowDown className="sm:hidden w-4 h-4 shrink-0" style={{ color: '#00684A' }} />
+            <motion.div className="flex-1 min-w-0" {...revealProps(0.07)}>
+              <CollectionChipCard {...COLLECTIONS[1]} />
+            </motion.div>
+            <ArrowRight className="hidden sm:block w-4 h-4 shrink-0" style={{ color: '#00684A' }} />
+            <ArrowDown className="sm:hidden w-4 h-4 shrink-0" style={{ color: '#00684A' }} />
+            <motion.div className="flex-1 min-w-0" {...revealProps(0.14)}>
+              <CollectionChipCard {...COLLECTIONS[2]} />
+            </motion.div>
+          </div>
+
+          <p className="mt-4 pt-3 text-[10px] sm:text-[11px] text-[#4b5b47]/50 text-center">
+            Also inside the cluster, not part of the flow
+          </p>
+          <div className="flex justify-center mt-2">
+            <motion.div className="max-w-[10rem] w-full" {...revealProps(0.21)}>
+              <CollectionChipCard {...COLLECTIONS[3]} />
+            </motion.div>
           </div>
         </motion.div>
       </div>
+
+      <motion.div className="max-w-4xl mx-auto mt-8 sm:mt-10 text-center" {...revealProps(0.3)}>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-2 sm:gap-3">
+          <div className="rounded-xl border bg-white/80 px-3 py-1.5 inline-flex items-center gap-1.5">
+            <FileText className="w-3.5 h-3.5" style={{ color: '#00684A' }} />
+            <span className="text-xs sm:text-sm font-semibold text-[#1f2a1d]">briefs</span>
+          </div>
+          <ArrowRight className="hidden sm:block w-4 h-4" style={{ color: '#00684A' }} />
+          <ArrowDown className="sm:hidden w-4 h-4" style={{ color: '#00684A' }} />
+          <div className="rounded-xl border bg-white/80 px-3 py-1.5 inline-flex items-center gap-1.5">
+            <Terminal className="w-3.5 h-3.5" style={{ color: '#4b5b47' }} />
+            <span className="text-xs sm:text-sm font-semibold text-[#1f2a1d]">Claude Code</span>
+          </div>
+        </div>
+        <p className="mt-3 text-xs sm:text-sm text-[#4b5b47]/80 max-w-xl mx-auto leading-relaxed">
+          The compiled brief goes back in, at session start, after every compaction, resume, and clear.
+        </p>
+      </motion.div>
 
       <div className="max-w-4xl mx-auto mt-14 sm:mt-16 pt-8 sm:pt-10 border-t border-[#4b5b47]/15 text-center">
         <h3 className="text-lg sm:text-xl font-normal" style={{ fontFamily: HEADING_FONT, color: '#336443' }}>

@@ -12,7 +12,7 @@ const BENCHMARK_LINKS: BenchmarkLink[] = [
     icon: FlaskConical,
     title: 'How the benchmark works',
     description:
-      'Five seeded conversations about a fictional payments service, then 12 follow-up questions days later with no shared history. Each arm runs in its own isolated config directory and, for the engine arms, its own database.',
+      'Five seeded conversations about a fictional payments service, then 12 follow-up questions days later with no shared history. Each arm runs in its own isolated config directory and, for the engine arms, its own database. Every seed and recall session runs on Claude Sonnet 5, the same model across all four arms.',
     href: 'https://github.com/saiteja05/mongo-claude-memory#benchmarking-the-memory-gauntlet',
   },
   {
@@ -26,7 +26,7 @@ const BENCHMARK_LINKS: BenchmarkLink[] = [
     icon: Gavel,
     title: 'Grading and adjudication',
     description:
-      'Word-boundary keyword matching grades every answer first. A blinded LLM judge that never learns which arm produced an answer reviews disagreements before any override is applied.',
+      'Word-boundary keyword matching grades every answer first. A blinded LLM judge that never learns which arm produced an answer reviews disagreements before any override is applied. The judge itself runs on Claude Sonnet 4.6 via Bedrock, a different model snapshot from the Sonnet 5 sessions it is grading.',
     href: 'https://github.com/saiteja05/mongo-claude-memory#grading-and-adjudication',
   },
   {
