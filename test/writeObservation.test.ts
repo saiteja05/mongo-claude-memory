@@ -21,10 +21,13 @@ afterEach(() => {
 
 function makeFakeDb() {
   const insertOne = vi.fn(async (doc: Record<string, unknown>) => ({ insertedId: "fake-id" }));
+  const insertMany = vi.fn(async (docs: Record<string, unknown>[]) => ({
+    insertedIds: Object.fromEntries(docs.map((_, index) => [index, `fake-id-${index}`])),
+  }));
   const db = {
-    collection: () => ({ insertOne }),
+    collection: () => ({ insertOne, insertMany }),
   };
-  return { db, insertOne };
+  return { db, insertOne, insertMany };
 }
 
 describe("writeObservation", () => {
@@ -140,5 +143,186 @@ describe("writeObservation", () => {
     });
 
     expect(result).toBe("fake-id");
+  });
+
+  it("omits chunk_index and chunk_count entirely when not provided", async () => {
+    const { writeObservation } = await import("../src/capture/writeObservation.js");
+    const { db, insertOne } = makeFakeDb();
+
+    await writeObservation(db as any, {
+      project: "myrepo-abc",
+      session_id: "sess-1",
+      source: "transcript",
+      priority: "normal",
+      text: "some content",
+    });
+
+    const doc = insertOne.mock.calls[0][0];
+    expect("chunk_index" in doc).toBe(false);
+    expect("chunk_count" in doc).toBe(false);
+  });
+
+  it("writes chunk_index and chunk_count when provided", async () => {
+    const { writeObservation } = await import("../src/capture/writeObservation.js");
+    const { db, insertOne } = makeFakeDb();
+
+    await writeObservation(db as any, {
+      project: "myrepo-abc",
+      session_id: "sess-1",
+      source: "transcript",
+      priority: "normal",
+      text: "some content",
+      chunk_index: 2,
+      chunk_count: 5,
+    });
+
+    const doc = insertOne.mock.calls[0][0];
+    expect(doc.chunk_index).toBe(2);
+    expect(doc.chunk_count).toBe(5);
+  });
+});
+
+describe("writeObservationsBulk", () => {
+  it("issues exactly one insertMany for a list of params", async () => {
+    const { writeObservationsBulk } = await import("../src/capture/writeObservation.js");
+    const { db, insertMany } = makeFakeDb();
+
+    await writeObservationsBulk(db as any, [
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript",
+        priority: "normal",
+        text: "chunk one",
+        chunk_index: 0,
+        chunk_count: 2,
+      },
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript",
+        priority: "normal",
+        text: "chunk two",
+        chunk_index: 1,
+        chunk_count: 2,
+      },
+    ]);
+
+    expect(insertMany).toHaveBeenCalledTimes(1);
+    const docs = insertMany.mock.calls[0][0] as Record<string, unknown>[];
+    expect(docs).toHaveLength(2);
+    const options = insertMany.mock.calls[0][1] as Record<string, unknown>;
+    expect(options.ordered).toBe(true);
+  });
+
+  it("applies the same source-aware clamp per doc as writeObservation", async () => {
+    const { writeObservationsBulk } = await import("../src/capture/writeObservation.js");
+    const { db, insertMany } = makeFakeDb();
+
+    // Transcript chunk keeps its END; remember (user-authored) keeps its
+    // BEGINNING, same rule as the single-write path.
+    const longTranscript = "a".repeat(10000) + "b".repeat(50000);
+    const longRemember = "c".repeat(50000) + "d".repeat(10000);
+
+    await writeObservationsBulk(db as any, [
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript",
+        priority: "normal",
+        text: longTranscript,
+      },
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "remember",
+        priority: "high",
+        text: longRemember,
+      },
+    ]);
+
+    const docs = insertMany.mock.calls[0][0] as Array<{ text: string }>;
+    expect(docs[0].text).toBe("b".repeat(50000));
+    expect(docs[1].text).toBe("c".repeat(50000));
+  });
+
+  it("stamps created_at values strictly increasing by one millisecond per entry", async () => {
+    const { writeObservationsBulk } = await import("../src/capture/writeObservation.js");
+    const { db, insertMany } = makeFakeDb();
+
+    await writeObservationsBulk(
+      db as any,
+      Array.from({ length: 4 }, (_, index) => ({
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript" as const,
+        priority: "normal" as const,
+        text: `chunk ${index}`,
+        chunk_index: index,
+        chunk_count: 4,
+      }))
+    );
+
+    const docs = insertMany.mock.calls[0][0] as Array<{ created_at: Date }>;
+    for (let i = 1; i < docs.length; i++) {
+      expect(docs[i].created_at.getTime()).toBe(docs[i - 1].created_at.getTime() + 1);
+    }
+  });
+
+  it("persists chunk_index and chunk_count when present, and omits both when absent", async () => {
+    const { writeObservationsBulk } = await import("../src/capture/writeObservation.js");
+    const { db, insertMany } = makeFakeDb();
+
+    await writeObservationsBulk(db as any, [
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript",
+        priority: "normal",
+        text: "with chunk fields",
+        chunk_index: 0,
+        chunk_count: 1,
+      },
+      {
+        project: "myrepo-abc",
+        session_id: "sess-2",
+        source: "remember",
+        priority: "high",
+        text: "no chunk fields",
+      },
+    ]);
+
+    const docs = insertMany.mock.calls[0][0] as Record<string, unknown>[];
+    expect(docs[0].chunk_index).toBe(0);
+    expect(docs[0].chunk_count).toBe(1);
+    expect("chunk_index" in docs[1]).toBe(false);
+    expect("chunk_count" in docs[1]).toBe(false);
+  });
+
+  it("sets a per-doc TTL for normal priority and omits expiresAt for high priority", async () => {
+    process.env.OBSERVATION_TTL_DAYS = "30";
+    const { writeObservationsBulk } = await import("../src/capture/writeObservation.js");
+    const { db, insertMany } = makeFakeDb();
+
+    await writeObservationsBulk(db as any, [
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "transcript",
+        priority: "normal",
+        text: "expires",
+      },
+      {
+        project: "myrepo-abc",
+        session_id: "sess-1",
+        source: "remember",
+        priority: "high",
+        text: "never expires",
+      },
+    ]);
+
+    const docs = insertMany.mock.calls[0][0] as Array<{ expiresAt?: Date }>;
+    expect(docs[0].expiresAt).toBeInstanceOf(Date);
+    expect("expiresAt" in docs[1]).toBe(false);
   });
 });

@@ -3,19 +3,21 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
 import { getDb, closeDb } from "../db/client.js";
-import { writeObservation } from "../capture/writeObservation.js";
+import { writeObservationsBulk, type WriteObservationParams } from "../capture/writeObservation.js";
 import { TRANSCRIPT_TAIL_LENGTH } from "../capture/constants.js";
 import { getBriefs, type BriefResult } from "../briefs/fetchBrief.js";
 import { appendFailure } from "../telemetry/failureLog.js";
 
-// Cheap rolling summary per DESIGN.md 5.1: the last TRANSCRIPT_TAIL_LENGTH
-// characters of the raw transcript file (shared constant in
-// capture/constants.ts so writeObservation's clamp cannot silently diverge),
-// not a parse of Claude Code's internal JSONL schema.
+// Cheap rolling summary per DESIGN.md 5.1: the raw transcript file, chunked
+// into consecutive TRANSCRIPT_TAIL_LENGTH-character slices and capped by
+// config.transcriptCaptureMaxChars (shared constants in capture/constants.ts
+// so writeObservation's clamp cannot silently diverge), not a parse of
+// Claude Code's internal JSONL schema.
 
 // Budget for the pre-capture brief fetch used to strip injected brief content
-// from the transcript tail. Deliberately short: stripping is an optimization
-// against the echo loop, not a requirement, so a slow fetch just skips it.
+// from the transcript before it is chunked. Deliberately short: stripping is
+// an optimization against the echo loop, not a requirement, so a slow fetch
+// just skips it.
 const BRIEF_STRIP_TIMEOUT_MS = 1500;
 
 // Brief contents shorter than this are never stripped: removing tiny common
@@ -33,18 +35,21 @@ export interface SessionEndInput {
 }
 
 export interface SessionEndDeps {
-  readTranscriptTail: (transcriptPath: string) => Promise<string | null>;
-  writeObservation: (params: {
-    project: string;
-    session_id: string;
-    source: "transcript";
-    priority: "normal";
-    text: string;
-  }) => Promise<unknown>;
+  readTranscript: (transcriptPath: string) => Promise<string | null>;
+  /**
+   * Bulk write: one insert round trip for every chunk of a session's
+   * transcript capture, so a multi-chunk capture still fits inside
+   * sessionEndTimeoutMs.
+   */
+  writeObservations: (paramsList: WriteObservationParams[]) => Promise<unknown>;
+  // Total transcript capture budget in characters, wired from
+  // config.transcriptCaptureMaxChars; caps how many TRANSCRIPT_TAIL_LENGTH
+  // chunks a single session's capture can keep.
+  transcriptCaptureMaxChars: number;
   getProjectKey: (cwd: string) => string;
   /**
    * Optional: fetches the currently injected briefs so their content can be
-   * stripped from the transcript tail before capture (echo-loop defense: the
+   * stripped from the transcript before it is chunked (echo-loop defense: the
    * injected brief is memory OUTPUT, and re-observing it would feed it back
    * into consolidation as if it were new evidence). Fail-open: any error or
    * absence just skips stripping.
@@ -65,25 +70,68 @@ export function stripInjectedBriefs(
   let result = tail;
   for (const content of briefContents) {
     if (typeof content !== "string" || content.length < MIN_BRIEF_STRIP_LENGTH) continue;
-    result = result.split(content).join("");
+    // tail is read from the raw transcript JSONL file, so any newline/quote/
+    // backslash in content appears there JSON-escaped, not as a real byte.
+    const escaped = JSON.stringify(content).slice(1, -1);
+    result = result.split(escaped).join("");
   }
   return result;
 }
 
 /**
- * Pure-ish core: reads the transcript tail, strips any injected brief content
- * from it (echo-loop defense) and, if there is anything left to capture,
- * writes one observation. Never throws; any failure (missing transcript,
- * writeObservation rejecting) is swallowed so the hook can always fail open
- * per DESIGN.md section 10.
+ * Splits text into consecutive chunkSize slices. When there are more chunks
+ * than maxChunks allows, keeps the first chunk (early session context) plus
+ * the most recent (maxChunks - 1) chunks, so droppedChars reports the size
+ * of the cut middle. maxChunks 1 is a degenerate budget with no room for both
+ * a first and a last chunk: it keeps only the LAST chunk, preserving today's
+ * pre-chunking most-recent-wins behavior rather than switching to a
+ * first-chunk-only capture for a single slot. Pure function, no I/O.
+ */
+export function chunkTranscript(
+  text: string,
+  chunkSize: number,
+  maxChunks: number
+): { chunks: string[]; droppedChars: number } {
+  if (!text) {
+    return { chunks: [], droppedChars: 0 };
+  }
+
+  const allChunks: string[] = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    allChunks.push(text.slice(i, i + chunkSize));
+  }
+
+  if (allChunks.length <= maxChunks) {
+    return { chunks: allChunks, droppedChars: 0 };
+  }
+
+  if (maxChunks <= 1) {
+    const dropped = allChunks.slice(0, -1);
+    const droppedChars = dropped.reduce((sum, chunk) => sum + chunk.length, 0);
+    return { chunks: [allChunks[allChunks.length - 1]], droppedChars };
+  }
+
+  const tailChunks = allChunks.slice(allChunks.length - (maxChunks - 1));
+  const droppedMiddle = allChunks.slice(1, allChunks.length - (maxChunks - 1));
+  const droppedChars = droppedMiddle.reduce((sum, chunk) => sum + chunk.length, 0);
+  return { chunks: [allChunks[0], ...tailChunks], droppedChars };
+}
+
+/**
+ * Pure-ish core: reads the full transcript, strips any injected brief content
+ * from it (echo-loop defense), chunks what is left, and, if there is
+ * anything to capture, writes one observation per chunk in a single bulk
+ * call. Never throws; any failure (missing transcript, writeObservations
+ * rejecting) is swallowed so the hook can always fail open per DESIGN.md
+ * section 10.
  */
 export async function captureSessionEnd(
   input: SessionEndInput,
   deps: SessionEndDeps
 ): Promise<void> {
   try {
-    const tail = await deps.readTranscriptTail(input.transcript_path);
-    if (!tail) return;
+    const raw = await deps.readTranscript(input.transcript_path);
+    if (!raw) return;
 
     const project = deps.getProjectKey(input.cwd);
 
@@ -96,16 +144,40 @@ export async function captureSessionEnd(
       }
     }
 
-    const text = stripInjectedBriefs(tail, [briefs.global, briefs.project]);
+    // Strip on the FULL transcript, before chunking: a brief straddling a
+    // chunk boundary would survive as two unmatched halves if it were
+    // stripped chunk-by-chunk instead, since stripInjectedBriefs only removes
+    // an EXACT whole-string match.
+    const text = stripInjectedBriefs(raw, [briefs.global, briefs.project]);
     if (!text.trim()) return;
 
-    await deps.writeObservation({
+    const maxChunks = Math.max(
+      1,
+      Math.floor(deps.transcriptCaptureMaxChars / TRANSCRIPT_TAIL_LENGTH)
+    );
+    const { chunks, droppedChars } = chunkTranscript(text, TRANSCRIPT_TAIL_LENGTH, maxChunks);
+    if (chunks.length === 0) return;
+
+    if (droppedChars > 0) {
+      // Counts only, never content: a dropped transcript slice can contain
+      // anything the session touched.
+      console.error(
+        `sessionEnd: transcript capture dropped ${droppedChars} chars, keeping ${chunks.length} of ${maxChunks} max chunks`
+      );
+    }
+
+    const chunkCount = chunks.length;
+    const paramsList: WriteObservationParams[] = chunks.map((chunkText, index) => ({
       project,
       session_id: input.session_id,
       source: "transcript",
       priority: "normal",
-      text,
-    });
+      text: chunkText,
+      chunk_index: index,
+      chunk_count: chunkCount,
+    }));
+
+    await deps.writeObservations(paramsList);
   } catch {
     // Fail open: a hook must never surface a memory-path error to the user.
   }
@@ -135,12 +207,12 @@ export async function captureSessionEndWithTimeout(
   }
 }
 
-async function readTranscriptTail(transcriptPath: string): Promise<string | null> {
+async function readTranscript(transcriptPath: string): Promise<string | null> {
   const { readFile } = await import("node:fs/promises");
   try {
     const content = await readFile(transcriptPath, "utf8");
     if (!content) return null;
-    return content.slice(-TRANSCRIPT_TAIL_LENGTH);
+    return content;
   } catch {
     // Missing file, unreadable, or a fresh session with no transcript yet.
     return null;
@@ -176,12 +248,13 @@ async function main(): Promise<void> {
     const config = loadConfig();
 
     const deps: SessionEndDeps = {
-      readTranscriptTail,
+      readTranscript,
       getProjectKey,
       getBriefs,
-      writeObservation: async (params) => {
+      transcriptCaptureMaxChars: config.transcriptCaptureMaxChars,
+      writeObservations: async (paramsList) => {
         const db = await getDb();
-        return writeObservation(db, params);
+        return writeObservationsBulk(db, paramsList);
       },
     };
 

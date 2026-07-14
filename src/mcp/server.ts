@@ -26,9 +26,11 @@ function jsonResult(payload: unknown): CallToolResult {
 }
 
 function errorResult(err: unknown): CallToolResult {
-  const message = err instanceof Error ? err.message : "unknown error";
+  // err.message can embed a raw connection string (e.g. a MongoParseError);
+  // only the error name ever reaches the model-visible tool result.
+  const name = err instanceof Error ? err.name : "unknown error";
   return {
-    content: [{ type: "text", text: `memory tool failed: ${message}` }],
+    content: [{ type: "text", text: `memory tool failed: ${name} (see server logs for details)` }],
     isError: true,
   };
 }
@@ -44,20 +46,33 @@ export function buildServer(defaultProject: string): McpServer {
     {
       title: "Search memory",
       description:
-        "Hybrid ($rankFusion) search over consolidated beliefs for the long tail memory_search escape hatch. Falls back gracefully to text-only or vector-only when Voyage or Atlas Search is unavailable.",
+        "Hybrid ($rankFusion) search over consolidated beliefs for the long tail memory_search escape hatch. Falls back gracefully to text-only or vector-only when Voyage or Atlas Search is unavailable. Searching a project other than the one this server resolved is rejected unless MEMORY_MCP_ALLOW_CROSS_PROJECT=1 is set.",
       inputSchema: {
         query: z.string().min(1),
-        project: z.string().optional(),
+        project: z.string().min(1).optional(),
         scope: z.string().optional(),
         limit: z.number().int().positive().optional(),
       },
     },
     async (args): Promise<CallToolResult> => {
       try {
+        const project = args.project ?? defaultProject;
+
+        // Mirrors memory_forget's cross-project guard: an ok-style result
+        // (not a protocol error) so the model can relay the reason instead
+        // of surfacing a tool failure.
+        if (project !== defaultProject && process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT !== "1") {
+          return jsonResult({
+            results: [],
+            degraded:
+              "cross-project search is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+          });
+        }
+
         const db = await getDb();
         const result = await runMemorySearch(db, {
           query: args.query,
-          project: args.project ?? defaultProject,
+          project,
           scope: args.scope,
           limit: args.limit,
         });
@@ -73,19 +88,31 @@ export function buildServer(defaultProject: string): McpServer {
     {
       title: "Write memory",
       description:
-        "Writes a high-priority observation (source: mcp_write). Never writes directly to beliefs: only the offline consolidator promotes observations to beliefs (DESIGN.md 7.1, 7.3).",
+        "Writes a high-priority observation (source: mcp_write). Never writes directly to beliefs: only the offline consolidator promotes observations to beliefs (DESIGN.md 7.1, 7.3). Writing to a project other than the one this server resolved is rejected unless MEMORY_MCP_ALLOW_CROSS_PROJECT=1 is set.",
       inputSchema: {
         text: z.string().min(1),
-        project: z.string().optional(),
+        project: z.string().min(1).optional(),
         session_id: z.string().optional(),
       },
     },
     async (args): Promise<CallToolResult> => {
       try {
+        const project = args.project ?? defaultProject;
+
+        // Mirrors memory_forget's cross-project guard: an ok-style result
+        // (not a protocol error) so the model can relay the reason instead
+        // of surfacing a tool failure.
+        if (project !== defaultProject && process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT !== "1") {
+          return jsonResult({
+            ok: false,
+            error: "cross-project write is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+          });
+        }
+
         const db = await getDb();
         const result = await runMemoryWrite(db, {
           text: args.text,
-          project: args.project ?? defaultProject,
+          project,
           session_id: args.session_id,
         });
         return jsonResult(result);
@@ -100,7 +127,7 @@ export function buildServer(defaultProject: string): McpServer {
     {
       title: "Forget a belief",
       description:
-        "Tombstones one belief in place by _id, scoped to the resolved project so a caller cannot tombstone another project's belief by guessing an id, then immediately recompiles the affected brief(s) so the belief stops being injected at the next SessionStart (recompiled: false in the result means the recompile failed and the next consolidation run will pick it up). Forgetting a belief in a DIFFERENT project than this server's resolved one is rejected unless MEMORY_MCP_ALLOW_CROSS_PROJECT=1 is set (destructive writes stay scoped to the project you are working in; memory_search and memory_write remain unrestricted). One of the two allowed direct-write exceptions in DESIGN.md 7.3.",
+        "Tombstones one belief in place by _id, scoped to the resolved project so a caller cannot tombstone another project's belief by guessing an id, then immediately recompiles the affected brief(s) so the belief stops being injected at the next SessionStart (recompiled: false in the result means the recompile failed and the next consolidation run will pick it up). Forgetting a belief in a DIFFERENT project than this server's resolved one is rejected unless MEMORY_MCP_ALLOW_CROSS_PROJECT=1 is set (the same guard also applies to memory_search and memory_write). One of the two allowed direct-write exceptions in DESIGN.md 7.3.",
       inputSchema: {
         beliefId: z.string().min(1),
         project: z.string().optional(),
@@ -193,7 +220,7 @@ const isEntryPoint =
 
 if (isEntryPoint) {
   main().catch((err) => {
-    console.error("[mcp] server failed to start:", err instanceof Error ? err.message : "unknown error");
+    console.error("[mcp] server failed to start:", err instanceof Error ? err.name : "unknown error");
     process.exitCode = 1;
   });
 }

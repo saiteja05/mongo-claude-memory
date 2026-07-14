@@ -1,10 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectKey, normalizeRemoteUrl } from "../src/project/projectKey.js";
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(thisDir, "..");
@@ -66,6 +71,12 @@ describe("normalizeRemoteUrl", () => {
       "github.com/SomeOrg/Some-Repo"
     );
   });
+
+  it("preserves case exactly for local-path and file:// remotes (no hostname to normalize)", () => {
+    expect(normalizeRemoteUrl("/Users/Alice/repo")).toBe("/Users/Alice/repo");
+    expect(normalizeRemoteUrl("file:///Users/Alice/repo")).toBe("/Users/Alice/repo");
+    expect(normalizeRemoteUrl("/Users/Alice/repo")).not.toBe(normalizeRemoteUrl("/users/alice/repo"));
+  });
 });
 
 describe("getProjectKey in remote mode (MEMORY_PROJECT_KEY_MODE=remote)", () => {
@@ -123,5 +134,34 @@ describe("getProjectKey in remote mode (MEMORY_PROJECT_KEY_MODE=remote)", () => 
     // remote-URL-derived key and stay stable for existing stored memory.
     expect(defaultKey).not.toBe(remoteKey);
     expect(defaultKey).toMatch(/^[a-zA-Z0-9._-]+-[0-9a-f]{12}$/);
+  });
+});
+
+describe("getProjectKey execFileSync timeout", () => {
+  afterEach(() => {
+    delete process.env.MEMORY_PROJECT_KEY_MODE;
+  });
+
+  it("passes a 2000ms timeout to git rev-parse --git-common-dir (path mode)", () => {
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecFileSync.mockClear();
+    getProjectKey(repoRoot);
+    const call = mockedExecFileSync.mock.calls.find(
+      ([cmd, args]) => cmd === "git" && (args as string[])?.[0] === "rev-parse"
+    );
+    expect(call).toBeDefined();
+    expect(call?.[2]).toMatchObject({ timeout: 2000 });
+  });
+
+  it("passes a 2000ms timeout to git config --get remote.origin.url (remote mode)", () => {
+    process.env.MEMORY_PROJECT_KEY_MODE = "remote";
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecFileSync.mockClear();
+    getProjectKey(repoRoot);
+    const call = mockedExecFileSync.mock.calls.find(
+      ([cmd, args]) => cmd === "git" && (args as string[])?.[0] === "config"
+    );
+    expect(call).toBeDefined();
+    expect(call?.[2]).toMatchObject({ timeout: 2000 });
   });
 });

@@ -89,18 +89,59 @@ describe("buildServer", () => {
       expect(params).toMatchObject({ query: "tabs vs spaces", project: DEFAULT_PROJECT });
     });
 
-    it("passes an explicit args.project through instead of the default", async () => {
+    it("accepts an explicit args.project equal to the default (same-project search works)", async () => {
       runMemorySearch.mockResolvedValue({ results: [], degraded: null });
 
       await withClient(DEFAULT_PROJECT, async (client) => {
         await client.callTool({
           name: "memory_search",
-          arguments: { query: "tabs vs spaces", project: "explicit-project" },
+          arguments: { query: "tabs vs spaces", project: DEFAULT_PROJECT },
         });
       });
 
       const [, params] = runMemorySearch.mock.calls[0];
-      expect(params).toMatchObject({ query: "tabs vs spaces", project: "explicit-project" });
+      expect(params).toMatchObject({ query: "tabs vs spaces", project: DEFAULT_PROJECT });
+    });
+
+    it("rejects a cross-project search by default without touching the DB", async () => {
+      const result = await withClient(DEFAULT_PROJECT, (client) =>
+        client.callTool({
+          name: "memory_search",
+          arguments: { query: "tabs vs spaces", project: "some-other-project" },
+        })
+      );
+
+      expect(result.isError).toBeFalsy(); // ok-style result, not a protocol error
+      expect(result.structuredContent).toMatchObject({
+        results: [],
+        degraded: "cross-project search is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+      });
+      expect(runMemorySearch).not.toHaveBeenCalled();
+      expect(getDb).not.toHaveBeenCalled();
+    });
+
+    it("allows a cross-project search when MEMORY_MCP_ALLOW_CROSS_PROJECT=1", async () => {
+      const saved = process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+      process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = "1";
+      try {
+        runMemorySearch.mockResolvedValue({ results: [], degraded: null });
+
+        await withClient(DEFAULT_PROJECT, async (client) => {
+          await client.callTool({
+            name: "memory_search",
+            arguments: { query: "tabs vs spaces", project: "some-other-project" },
+          });
+        });
+
+        const [, params] = runMemorySearch.mock.calls[0];
+        expect(params).toMatchObject({ project: "some-other-project" });
+      } finally {
+        if (saved === undefined) {
+          delete process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+        } else {
+          process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = saved;
+        }
+      }
     });
 
     it("returns structuredContent matching what runMemorySearch resolved, on success", async () => {
@@ -119,8 +160,10 @@ describe("buildServer", () => {
       expect(JSON.parse(firstTextBlock(result as CallToolResult))).toEqual(payload);
     });
 
-    it("returns isError true with a 'memory tool failed' message when runMemorySearch throws", async () => {
-      runMemorySearch.mockRejectedValue(new Error("mongot unavailable"));
+    it("returns isError true with a 'memory tool failed' message when runMemorySearch throws, and never leaks err.message (which can embed a connection string)", async () => {
+      runMemorySearch.mockRejectedValue(
+        new Error("mongot unavailable: mongodb+srv://user:supersecret@cluster0.example.mongodb.net/")
+      );
 
       const result = await withClient(DEFAULT_PROJECT, (client) =>
         client.callTool({ name: "memory_search", arguments: { query: "tabs" } })
@@ -129,7 +172,9 @@ describe("buildServer", () => {
       expect(result.isError).toBe(true);
       const text = firstTextBlock(result as CallToolResult);
       expect(text).toContain("memory tool failed");
-      expect(text).toContain("mongot unavailable");
+      expect(text).toContain("Error"); // error NAME only
+      expect(text).not.toContain("mongot unavailable");
+      expect(text).not.toContain("mongodb+srv://");
     });
   });
 
@@ -145,18 +190,59 @@ describe("buildServer", () => {
       expect(params).toMatchObject({ text: "the user prefers tabs", project: DEFAULT_PROJECT });
     });
 
-    it("passes an explicit args.project through instead of the default", async () => {
+    it("accepts an explicit args.project equal to the default (same-project write works)", async () => {
       runMemoryWrite.mockResolvedValue({ ok: true, observationId: "obs-1" });
 
       await withClient(DEFAULT_PROJECT, async (client) => {
         await client.callTool({
           name: "memory_write",
-          arguments: { text: "the user prefers tabs", project: "explicit-project" },
+          arguments: { text: "the user prefers tabs", project: DEFAULT_PROJECT },
         });
       });
 
       const [, params] = runMemoryWrite.mock.calls[0];
-      expect(params).toMatchObject({ project: "explicit-project" });
+      expect(params).toMatchObject({ project: DEFAULT_PROJECT });
+    });
+
+    it("rejects a cross-project write by default without touching the DB", async () => {
+      const result = await withClient(DEFAULT_PROJECT, (client) =>
+        client.callTool({
+          name: "memory_write",
+          arguments: { text: "the user prefers tabs", project: "some-other-project" },
+        })
+      );
+
+      expect(result.isError).toBeFalsy(); // ok-style result, not a protocol error
+      expect(result.structuredContent).toMatchObject({
+        ok: false,
+        error: "cross-project write is disabled; set MEMORY_MCP_ALLOW_CROSS_PROJECT=1 to enable",
+      });
+      expect(runMemoryWrite).not.toHaveBeenCalled();
+      expect(getDb).not.toHaveBeenCalled();
+    });
+
+    it("allows a cross-project write when MEMORY_MCP_ALLOW_CROSS_PROJECT=1", async () => {
+      const saved = process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+      process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = "1";
+      try {
+        runMemoryWrite.mockResolvedValue({ ok: true, observationId: "obs-1" });
+
+        await withClient(DEFAULT_PROJECT, async (client) => {
+          await client.callTool({
+            name: "memory_write",
+            arguments: { text: "the user prefers tabs", project: "some-other-project" },
+          });
+        });
+
+        const [, params] = runMemoryWrite.mock.calls[0];
+        expect(params).toMatchObject({ project: "some-other-project" });
+      } finally {
+        if (saved === undefined) {
+          delete process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT;
+        } else {
+          process.env.MEMORY_MCP_ALLOW_CROSS_PROJECT = saved;
+        }
+      }
     });
 
     it("returns structuredContent matching what runMemoryWrite resolved, on success", async () => {
@@ -171,8 +257,10 @@ describe("buildServer", () => {
       expect(result.structuredContent).toEqual(payload);
     });
 
-    it("returns isError true with a 'memory tool failed' message when runMemoryWrite throws", async () => {
-      runMemoryWrite.mockRejectedValue(new Error("write failed"));
+    it("returns isError true with a 'memory tool failed' message when runMemoryWrite throws, and never leaks err.message (which can embed a connection string)", async () => {
+      runMemoryWrite.mockRejectedValue(
+        new Error("write failed: mongodb+srv://user:supersecret@cluster0.example.mongodb.net/")
+      );
 
       const result = await withClient(DEFAULT_PROJECT, (client) =>
         client.callTool({ name: "memory_write", arguments: { text: "some text" } })
@@ -181,7 +269,9 @@ describe("buildServer", () => {
       expect(result.isError).toBe(true);
       const text = firstTextBlock(result as CallToolResult);
       expect(text).toContain("memory tool failed");
-      expect(text).toContain("write failed");
+      expect(text).toContain("Error"); // error NAME only
+      expect(text).not.toContain("write failed: mongodb");
+      expect(text).not.toContain("mongodb+srv://");
     });
   });
 
@@ -265,8 +355,10 @@ describe("buildServer", () => {
       expect(result.structuredContent).toEqual(payload);
     });
 
-    it("returns isError true with a 'memory tool failed' message when runMemoryForget throws", async () => {
-      runMemoryForget.mockRejectedValue(new Error("forget failed"));
+    it("returns isError true with a 'memory tool failed' message when runMemoryForget throws, and never leaks err.message (which can embed a connection string)", async () => {
+      runMemoryForget.mockRejectedValue(
+        new Error("forget failed: mongodb+srv://user:supersecret@cluster0.example.mongodb.net/")
+      );
 
       const result = await withClient(DEFAULT_PROJECT, (client) =>
         client.callTool({ name: "memory_forget", arguments: { beliefId: "507f1f77bcf86cd799439011" } })
@@ -275,7 +367,9 @@ describe("buildServer", () => {
       expect(result.isError).toBe(true);
       const text = firstTextBlock(result as CallToolResult);
       expect(text).toContain("memory tool failed");
-      expect(text).toContain("forget failed");
+      expect(text).toContain("Error"); // error NAME only
+      expect(text).not.toContain("forget failed: mongodb");
+      expect(text).not.toContain("mongodb+srv://");
     });
   });
 });

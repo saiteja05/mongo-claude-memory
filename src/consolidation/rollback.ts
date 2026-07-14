@@ -59,6 +59,11 @@ function toFilterId(id: string): ObjectId | string {
  *   rollback-awareness), the belief's version will have moved on, the CAS
  *   write matches nothing, and we report it in needsManualReview instead of
  *   silently tombstoning out from under that other run's contribution.
+ * - Restoring a superseded belief is itself guarded: if some other, still
+ *   active belief already lists the superseded belief as its own supersedes,
+ *   that other belief is a newer successor, and restoring here would produce
+ *   two active beliefs for the same lineage. Reported in needsManualReview
+ *   instead of restored.
  *
  * Also resets this run's observations back to "pending" so they can be
  * reprocessed, and recompiles the brief(s) for every scope actually changed.
@@ -141,24 +146,46 @@ export async function runRollback(
     revertedBeliefs.push(String(belief._id));
 
     if (belief.supersedes) {
-      // Restore guards: (a) filter on status "archived" so a belief the user
-      // explicitly forgot (tombstoned) is never resurrected by a rollback,
-      // and a belief that is somehow already active is not double-restored;
-      // (b) $inc version so the every-mutation-bumps-version invariant that
-      // this file's own tombstone CAS depends on holds here too.
-      const restoreResult = await beliefsCollection.updateOne(
-        { _id: toFilterId(String(belief.supersedes)) as never, status: "archived" },
-        { $set: { status: "active", updated_at: now }, $inc: { version: 1 } }
-      );
-      if (restoreResult.matchedCount > 0) {
-        restoredBeliefs.push(String(belief.supersedes));
-      } else {
+      // A newer, unrelated belief may have since superseded the one being
+      // rolled back and still be active: restoring belief.supersedes in that
+      // case would resurrect a stale grandparent belief alongside it,
+      // producing two simultaneously-active beliefs for the same fact
+      // lineage. Checked immediately before the restore write; the narrow
+      // time-of-check-to-time-of-use gap is an accepted limitation since
+      // rollback is a rare operator-invoked escape hatch, not a hot
+      // concurrent path.
+      const newerSuccessor = await beliefsCollection.findOne({
+        supersedes: String(belief._id),
+        status: "active",
+      });
+
+      if (newerSuccessor) {
         needsManualReview.push({
           beliefId: String(belief.supersedes),
           observationIds: [],
           runObservationIds: [],
-          reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+          reason: "a newer belief has since superseded this one and is still active",
         });
+      } else {
+        // Restore guards: (a) filter on status "archived" so a belief the user
+        // explicitly forgot (tombstoned) is never resurrected by a rollback,
+        // and a belief that is somehow already active is not double-restored;
+        // (b) $inc version so the every-mutation-bumps-version invariant that
+        // this file's own tombstone CAS depends on holds here too.
+        const restoreResult = await beliefsCollection.updateOne(
+          { _id: toFilterId(String(belief.supersedes)) as never, status: "archived" },
+          { $set: { status: "active", updated_at: now }, $inc: { version: 1 } }
+        );
+        if (restoreResult.matchedCount > 0) {
+          restoredBeliefs.push(String(belief.supersedes));
+        } else {
+          needsManualReview.push({
+            beliefId: String(belief.supersedes),
+            observationIds: [],
+            runObservationIds: [],
+            reason: "superseded belief not restorable (already active, tombstoned, or missing)",
+          });
+        }
       }
     }
 

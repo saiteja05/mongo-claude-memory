@@ -4,6 +4,8 @@ import type { Observation } from "../db/schema.js";
 import type { CandidateFact, ExistingBeliefContext } from "./extractFacts.js";
 import type { UpsertBeliefResult } from "./upsertBelief.js";
 import { validateCandidateFact } from "./validateFact.js";
+import { classifyInjection as defaultClassifyInjection } from "./classifyInjection.js";
+import type { ClassifyInjectionResult } from "./classifyInjection.js";
 
 export interface RunConsolidationResult {
   processed: number;
@@ -27,7 +29,7 @@ export interface RunConsolidationDeps {
   // Total text-length budget for one claimed batch (see claim.ts). Optional
   // so existing callers/tests that omit it keep claimBatch's own default.
   consolidationBatchMaxChars?: number;
-  reclaimStale: (db: Db, project: string, reclaimAfterMs: number) => Promise<number>;
+  reclaimStale: (db: Db, project: string, reclaimAfterMs: number, runId: string) => Promise<number>;
   acquireLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
   renewLease: (db: Db, project: string, runId: string, leaseMs: number) => Promise<boolean>;
   releaseLease: (db: Db, project: string, runId: string) => Promise<void>;
@@ -43,6 +45,14 @@ export interface RunConsolidationDeps {
     observations: Observation[],
     existingBeliefs: ExistingBeliefContext[]
   ) => Promise<CandidateFact[]>;
+  // Second, independent LLM-based prompt-injection check, run per-candidate
+  // alongside the deterministic validateCandidateFact/validateBeliefText
+  // checks (DESIGN.md section 9). Optional: when omitted, defaults to the
+  // real classifyInjection (classifyInjection.ts), which itself fails open
+  // on any provider error or malformed response, so production callers that
+  // do not set this field still get the real check, while tests must
+  // explicitly inject a fake to avoid making a real LLM call.
+  classifyInjection?: (text: string) => Promise<ClassifyInjectionResult>;
   embed: (texts: string[]) => Promise<number[][]>;
   upsertBelief: (
     db: Db,
@@ -105,7 +115,7 @@ export async function runConsolidation(
   project: string,
   deps: RunConsolidationDeps
 ): Promise<RunConsolidationResult> {
-  await deps.reclaimStale(db, project, deps.reclaimAfterMs);
+  await deps.reclaimStale(db, project, deps.reclaimAfterMs, deps.runId);
 
   const acquired = await deps.acquireLease(db, project, deps.runId, deps.leaseMs);
   if (!acquired) {
@@ -164,6 +174,15 @@ export async function runConsolidation(
       if (!validation.valid) {
         console.error(
           `[consolidate] dropped candidate fact (${validation.reason}): "${candidate.text.slice(0, 80)}"`
+        );
+        continue;
+      }
+
+      const classification = await (deps.classifyInjection ?? defaultClassifyInjection)(candidate.text);
+      if (classification.isInjection) {
+        console.error(
+          `[consolidate] dropped candidate fact (classifyInjection flagged as prompt injection` +
+            `${classification.reason ? `: ${classification.reason}` : ""}): "${candidate.text.slice(0, 80)}"`
         );
         continue;
       }

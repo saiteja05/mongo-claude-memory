@@ -205,7 +205,7 @@ const isEntryPoint =
 
 if (isEntryPoint) {
   main().catch((err) => {
-    console.error("Index setup failed:", err instanceof Error ? err.message : "unknown error");
+    console.error("Index setup failed:", err instanceof Error ? err.name : "unknown error");
     process.exitCode = 1;
   });
 }

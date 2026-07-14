@@ -4,6 +4,15 @@ import { BELIEFS, BRIEFS } from "../db/schema.js";
 
 const CHARS_PER_TOKEN = 4;
 
+// Bounds the beliefs fetch: the global-scope filter has no project constraint,
+// so without this the query would pull every active core belief across the
+// whole deployment and in-memory-sort all of them on every project's routine
+// consolidation run. Sorting by importance/last_evidence_at server-side and
+// capping here keeps the highest-importance beliefs in scope with very high
+// probability, since importance is already the dominant ranking factor in
+// rankScore below.
+const MAX_BELIEFS_PER_COMPILE = 1000;
+
 // Ranking weights for the brief compiler (DESIGN.md 8.1: "blend of importance,
 // recency, and use_count"). Importance dominates since it is the
 // consolidator's own quality judgment; recency and use_count are secondary
@@ -139,7 +148,11 @@ export async function compileBrief(db: Db, scopeKey: "global" | string): Promise
     ? { scope: "core", status: "active" }
     : { project: scopeKey, scope: "project", status: "active" };
 
-  const beliefs = await beliefsCollection.find(filter).toArray();
+  const beliefs = await beliefsCollection
+    .find(filter)
+    .sort({ importance: -1, last_evidence_at: -1 })
+    .limit(MAX_BELIEFS_PER_COMPILE)
+    .toArray();
   const sorted = sortBeliefs(beliefs);
   const { content, beliefIds } = render(sorted, tokenCap, scopeKey);
 

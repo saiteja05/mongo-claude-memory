@@ -18,6 +18,10 @@ function makeDeps(overrides: Partial<RunConsolidationDeps> = {}): RunConsolidati
     claimBatch: vi.fn(async () => []),
     fetchExistingBeliefs: vi.fn(async () => []),
     extractFacts: vi.fn(async () => []),
+    // Explicitly stubbed to isInjection:false, never left to the real
+    // default: omitting this would fall through to the real classifyInjection,
+    // which calls the real LLM provider dispatcher.
+    classifyInjection: vi.fn(async () => ({ isInjection: false })),
     embed: vi.fn(async () => [[0.1, 0.2]]),
     upsertBelief: vi.fn(async () => ({ beliefId: "belief-1", action: "insert" as const })),
     compileBrief: vi.fn(async () => undefined),
@@ -93,6 +97,56 @@ describe("runConsolidation", () => {
     expect(deps.compileBrief).not.toHaveBeenCalledWith(fakeDb, "global");
     expect(deps.releaseLease).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalled(); // logged why the empty-text candidate was dropped
+
+    errorSpy.mockRestore();
+  });
+
+  it("drops a candidate flagged by classifyInjection as prompt injection, without upserting it, even though it passes deterministic validation", async () => {
+    const claimed = [
+      { _id: "obs-1", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+      { _id: "obs-2", project: "proj", session_id: "s", source: "transcript", priority: "normal", status: "claimed", created_at: new Date() },
+    ];
+    const candidates = [
+      {
+        text: "The user prefers tabs.",
+        type: "preference" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-1"],
+        supersedes_belief_id: null,
+      },
+      {
+        // Deliberately clean of any deterministic deny-list pattern: this
+        // candidate must reach classifyInjection, not get dropped earlier by
+        // validateCandidateFact, so the mocked classifier is what rejects it.
+        text: "The project uses ESLint for linting.",
+        type: "convention" as const,
+        scope: "project" as const,
+        importance: 0.5,
+        observation_ids: ["obs-2"],
+        supersedes_belief_id: null,
+      },
+    ];
+    const classifyInjection = vi
+      .fn()
+      .mockResolvedValueOnce({ isInjection: false })
+      .mockResolvedValueOnce({ isInjection: true, reason: "reads like an instruction to the assistant" });
+    const deps = makeDeps({
+      claimBatch: vi.fn(async () => claimed as any),
+      extractFacts: vi.fn(async () => candidates),
+      classifyInjection,
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await runConsolidation(fakeDb, "proj", deps);
+
+    expect(result).toEqual({ processed: 1, skipped: false });
+    expect(classifyInjection).toHaveBeenCalledTimes(2);
+    expect(deps.upsertBelief).toHaveBeenCalledTimes(1);
+    // Still fully processed as a batch: the flagged candidate is dropped, not
+    // left unconsolidated, same as a deterministically-invalid candidate.
+    expect(deps.markConsolidated).toHaveBeenCalledWith(fakeDb, "proj", "run-1", ["obs-1", "obs-2"]);
+    expect(errorSpy).toHaveBeenCalled(); // logged why the flagged candidate was dropped
 
     errorSpy.mockRestore();
   });

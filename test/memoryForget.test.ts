@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { runMemoryForget } from "../src/mcp/memoryForget.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 function makeFakeDb(matchedCount: number, beliefDoc: Record<string, unknown> | null = null) {
   const findOne = vi.fn(async () => beliefDoc);
@@ -13,12 +15,29 @@ function makeDeps(compileBriefImpl?: () => Promise<void>) {
   return { compileBrief };
 }
 
+let savedCacheDir: string | undefined;
+
+beforeEach(() => {
+  vi.resetModules();
+  vi.doUnmock("../src/briefs/briefCache.js");
+  // A matched tombstone now best-effort deletes a local brief cache file;
+  // point it at a scratch dir so these tests never touch a real
+  // ~/.mongo-claude-memory cache on the machine running them.
+  savedCacheDir = process.env.MEMORY_BRIEF_CACHE_DIR;
+  process.env.MEMORY_BRIEF_CACHE_DIR = mkdtempSync(
+    path.join(tmpdir(), "mongo-claude-memory-forget-cache-")
+  );
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
+  if (savedCacheDir === undefined) delete process.env.MEMORY_BRIEF_CACHE_DIR;
+  else process.env.MEMORY_BRIEF_CACHE_DIR = savedCacheDir;
 });
 
 describe("runMemoryForget", () => {
   it("matches on both _id and project, sets status tombstoned, and increments version", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db, updateOne } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
     const deps = makeDeps();
 
@@ -39,6 +58,7 @@ describe("runMemoryForget", () => {
   });
 
   it("returns matched:false and skips recompile when the update matches nothing (wrong project or nonexistent id)", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db } = makeFakeDb(0);
     const deps = makeDeps();
 
@@ -54,6 +74,7 @@ describe("runMemoryForget", () => {
   });
 
   it("falls back to the raw string id when the beliefId is not a valid ObjectId (test doubles use plain string ids)", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db, updateOne } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
     const deps = makeDeps();
 
@@ -70,6 +91,7 @@ describe("runMemoryForget", () => {
   });
 
   it("recompiles the project brief on a matched project-scope tombstone", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
     const deps = makeDeps();
 
@@ -85,6 +107,7 @@ describe("runMemoryForget", () => {
   });
 
   it("also recompiles the global brief when the tombstoned belief has core scope", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db } = makeFakeDb(1, { scope: "core", project: "myrepo-abc" });
     const deps = makeDeps();
 
@@ -101,6 +124,7 @@ describe("runMemoryForget", () => {
   });
 
   it("still returns matched:true (with recompiled:false) when the recompile fails, logging one stderr line", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
     const deps = makeDeps(async () => {
       throw new Error("brief recompile exploded");
@@ -119,6 +143,7 @@ describe("runMemoryForget", () => {
   });
 
   it("recompiles only the project brief when the belief document cannot be re-fetched (scope unknown)", async () => {
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
     const { db } = makeFakeDb(1, null);
     const deps = makeDeps();
 
@@ -131,5 +156,52 @@ describe("runMemoryForget", () => {
     expect(result).toEqual({ matched: true, recompiled: true });
     expect(deps.compileBrief).toHaveBeenCalledTimes(1);
     expect(deps.compileBrief).toHaveBeenCalledWith(db, "myrepo-abc");
+  });
+
+  it("calls the local brief cache invalidator with the project key after a matched tombstone", async () => {
+    vi.doMock("../src/briefs/briefCache.js", () => ({
+      deleteBriefCache: vi.fn(),
+    }));
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
+    const { deleteBriefCache } = await import("../src/briefs/briefCache.js");
+    const { db } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
+    const deps = makeDeps();
+
+    await runMemoryForget(db as any, { project: "myrepo-abc", beliefId: "belief-1" }, deps);
+
+    expect(deleteBriefCache).toHaveBeenCalledWith("myrepo-abc");
+  });
+
+  it("does not invalidate the cache, and does not skip recompile, when the update matches nothing", async () => {
+    vi.doMock("../src/briefs/briefCache.js", () => ({
+      deleteBriefCache: vi.fn(),
+    }));
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
+    const { deleteBriefCache } = await import("../src/briefs/briefCache.js");
+    const { db } = makeFakeDb(0);
+    const deps = makeDeps();
+
+    await runMemoryForget(db as any, { project: "myrepo-abc", beliefId: "belief-1" }, deps);
+
+    expect(deleteBriefCache).not.toHaveBeenCalled();
+  });
+
+  it("does not fail the forget, or change the reported result, when the cache invalidator throws", async () => {
+    vi.doMock("../src/briefs/briefCache.js", () => ({
+      deleteBriefCache: vi.fn(() => {
+        throw new Error("cache delete exploded");
+      }),
+    }));
+    const { runMemoryForget } = await import("../src/mcp/memoryForget.js");
+    const { db } = makeFakeDb(1, { scope: "project", project: "myrepo-abc" });
+    const deps = makeDeps();
+
+    const result = await runMemoryForget(
+      db as any,
+      { project: "myrepo-abc", beliefId: "belief-1" },
+      deps
+    );
+
+    expect(result).toEqual({ matched: true, recompiled: true });
   });
 });

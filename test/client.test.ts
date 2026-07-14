@@ -45,6 +45,56 @@ describe("getDb", () => {
     }
   });
 
+  it("never includes the raw connection string in the thrown error when the MongoClient constructor itself throws synchronously (e.g. a malformed URI)", async () => {
+    vi.doMock("mongodb", () => ({
+      MongoClient: class {
+        constructor(uri: string) {
+          throw new Error(`invalid connection string: ${uri}`);
+        }
+      },
+    }));
+
+    const { getDb } = await import("../src/db/client.js");
+
+    await expect(getDb()).rejects.toThrow();
+    try {
+      await getDb();
+      expect.unreachable("getDb should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).not.toContain(SECRET_URI);
+      expect(message).not.toContain("supersecret");
+    }
+  });
+
+  it("allows retrying when the MongoClient constructor throws (does not permanently cache a failed construction attempt)", async () => {
+    let constructAttempts = 0;
+    vi.doMock("mongodb", () => ({
+      MongoClient: class {
+        constructor() {
+          constructAttempts++;
+          if (constructAttempts === 1) {
+            throw new Error(`bad uri: ${SECRET_URI}`);
+          }
+        }
+        connect() {
+          return Promise.resolve(this);
+        }
+        db(name: string) {
+          return { dbName: name };
+        }
+      },
+    }));
+
+    const { getDb } = await import("../src/db/client.js");
+
+    await expect(getDb()).rejects.toThrow();
+    const db = await getDb();
+    expect((db as unknown as { dbName: string }).dbName).toBe("claude_memory");
+    expect(constructAttempts).toBe(2);
+  });
+
   it("allows retrying (does not permanently cache a failed connection attempt)", async () => {
     let attempts = 0;
     vi.doMock("mongodb", () => ({

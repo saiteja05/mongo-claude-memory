@@ -78,10 +78,22 @@ export async function getDb(): Promise<Db> {
   const config = loadConfig();
 
   if (!clientPromise) {
-    const client = new MongoClient(config.mongodbUri, {
-      serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
-      connectTimeoutMS: CONNECT_TIMEOUT_MS,
-    });
+    // The MongoClient constructor itself can throw synchronously (e.g. a
+    // MongoParseError for a malformed URI), not just connect() later; it
+    // needs the same redaction since that error can also embed the raw URI.
+    let client: MongoClient;
+    try {
+      client = new MongoClient(config.mongodbUri, {
+        serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+        connectTimeoutMS: CONNECT_TIMEOUT_MS,
+      });
+    } catch (err) {
+      throw new Error(
+        `Failed to connect to MongoDB (see original error for details, redacted here): ${
+          err instanceof Error ? err.name : "unknown error"
+        }`
+      );
+    }
     clientPromise = connectWithHardTimeout(client).catch((err) => {
       clientPromise = null;
       throw new Error(

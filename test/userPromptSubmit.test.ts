@@ -143,7 +143,7 @@ describe("runUserPromptSubmitHook", () => {
   it("returns skipped for a non-# prompt and never touches the DB", async () => {
     const deps = makeDeps();
 
-    const outcome = await runUserPromptSubmitHook(
+    const { outcome } = await runUserPromptSubmitHook(
       { ...baseInput, prompt: "please fix this bug" },
       deps
     );
@@ -164,14 +164,16 @@ describe("runUserPromptSubmitHook", () => {
     const pending = runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps);
     await vi.advanceTimersByTimeAsync(2000);
 
-    await expect(pending).resolves.toBe("written");
+    const result = await pending;
+    expect(result.outcome).toBe("written");
+    expect(result.pendingWrite).toBeNull();
     expect(writeObservation).toHaveBeenCalledTimes(1);
     const [, params] = writeObservation.mock.calls[0] as [Db, { text: string; priority: string }];
     expect(params.text).toBe("#remember this fact");
     expect(params.priority).toBe("high");
   });
 
-  it("returns timeout (without throwing) when the write exceeds hookWriteTimeoutMs", async () => {
+  it("returns timeout (without throwing) when the write exceeds hookWriteTimeoutMs, but exposes a pendingWrite that is allowed to settle", async () => {
     vi.useFakeTimers();
     const writeObservation = vi.fn(
       (_db: Db, _params: unknown) =>
@@ -182,7 +184,15 @@ describe("runUserPromptSubmitHook", () => {
     const pending = runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps);
     await vi.advanceTimersByTimeAsync(5000);
 
-    await expect(pending).resolves.toBe("timeout");
+    const result = await pending;
+    expect(result.outcome).toBe("timeout");
+    expect(result.pendingWrite).not.toBeNull();
+
+    // The write is not abandoned/torn down when timeout wins: it keeps
+    // running and pendingWrite only settles once it genuinely resolves.
+    await vi.advanceTimersByTimeAsync(55000);
+    await expect(result.pendingWrite).resolves.toBeUndefined();
+    expect(writeObservation).toHaveBeenCalledTimes(1);
   });
 
   it("returns error (never throws) when the write rejects", async () => {
@@ -191,9 +201,12 @@ describe("runUserPromptSubmitHook", () => {
     });
     const deps = makeDeps({ writeObservation: writeObservation as never });
 
-    await expect(
-      runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps)
-    ).resolves.toBe("error");
+    const result = await runUserPromptSubmitHook(
+      { ...baseInput, prompt: "#remember this fact" },
+      deps
+    );
+    expect(result.outcome).toBe("error");
+    expect(result.pendingWrite).toBeNull();
   });
 
   it("returns error (never throws) when the DB connect itself rejects", async () => {
@@ -202,9 +215,12 @@ describe("runUserPromptSubmitHook", () => {
     });
     const deps = makeDeps({ getDb: getDb as never });
 
-    await expect(
-      runUserPromptSubmitHook({ ...baseInput, prompt: "#remember this fact" }, deps)
-    ).resolves.toBe("error");
+    const result = await runUserPromptSubmitHook(
+      { ...baseInput, prompt: "#remember this fact" },
+      deps
+    );
+    expect(result.outcome).toBe("error");
+    expect(result.pendingWrite).toBeNull();
     expect(deps.writeObservation).not.toHaveBeenCalled();
   });
 });

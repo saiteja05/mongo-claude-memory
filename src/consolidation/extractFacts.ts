@@ -1,5 +1,6 @@
 import type { Observation } from "../db/schema.js";
 import { callWithTool } from "../llm/index.js";
+import { foldConfusables } from "./textNormalize.js";
 
 export interface ExistingBeliefContext {
   _id: string;
@@ -76,6 +77,10 @@ belief. Assistant restatements of remembered context are not new facts: when the
 shows the assistant repeating an injected memory brief or recalling an already-stored fact, \
 that is memory output, not new evidence, and must not be emitted.
 
+Some observation tags also carry session and chunk attributes: chunked observations sharing a \
+session id are consecutive slices of one session's transcript and should be read together in \
+chunk order.
+
 Call the ${TOOL_NAME} tool with your extracted facts.`;
 
 // Matches a literal opening or closing observation tag anywhere in untrusted
@@ -88,21 +93,58 @@ const OBSERVATION_TAG_PATTERN = /<\/?\s*observation\b/gi;
  * untrusted text so it cannot be interpolated as a delimiter and used to
  * break out of the real delimited block (DESIGN.md section 9 mitigation 1
  * only holds if the boundary itself cannot be forged from inside the data).
+ *
+ * Matches are found against a homoglyph-folded copy of the text (Cyrillic/
+ * Greek lookalike letters folded to Latin, e.g. a Cyrillic letter that looks
+ * like Latin "o" standing in for the "o" in "observation") so an ASCII-only
+ * regex cannot be dodged by a homoglyph-spelled tag. foldConfusables is
+ * guaranteed length-preserving, so the match indices found in the folded
+ * copy apply unchanged to the original text; the neutralizing replacement is
+ * applied there, against the matched range only, so no other content is
+ * altered.
  */
 function sanitizeObservationText(text: string): string {
-  return text.replace(OBSERVATION_TAG_PATTERN, (match) => match.replace("<", "&lt;"));
+  const folded = foldConfusables(text);
+  const matches = [...folded.matchAll(OBSERVATION_TAG_PATTERN)];
+  if (matches.length === 0) {
+    return text;
+  }
+
+  let result = "";
+  let cursor = 0;
+  for (const match of matches) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    result += text.slice(cursor, start);
+    result += text.slice(start, end).replace("<", "&lt;");
+    cursor = end;
+  }
+  result += text.slice(cursor);
+  return result;
 }
 
 /**
  * Wraps each observation's raw text in an explicit delimited block so the
  * LLM prompt structurally separates untrusted data from instructions
  * (DESIGN.md section 9). The text itself is sanitized first so it cannot
- * contain a forged closing (or nested opening) tag.
+ * contain a forged closing (or nested opening) tag. When the observation
+ * carries chunk_count (one of SessionEnd's multi-chunk transcript captures),
+ * the tag also carries session and chunk attributes so the LLM can read
+ * sibling chunks of one session together, in order.
  */
 function renderObservationBlock(observation: Observation): string {
   const id = String(observation._id ?? "");
   const text = sanitizeObservationText(observation.text);
-  return `<observation id="${id}">\n${text}\n</observation>`;
+  const attributes = [`id="${id}"`];
+  if (typeof observation.chunk_count === "number") {
+    // session_id is our own field, but it is still stored, untrusted data:
+    // strip double quotes so it can never break out of the attribute it is
+    // interpolated into.
+    const sessionId = String(observation.session_id ?? "").replace(/"/g, "");
+    const chunkNumber = (observation.chunk_index ?? 0) + 1;
+    attributes.push(`session="${sessionId}"`, `chunk="${chunkNumber} of ${observation.chunk_count}"`);
+  }
+  return `<observation ${attributes.join(" ")}>\n${text}\n</observation>`;
 }
 
 function renderExistingBeliefs(existingBeliefs: ExistingBeliefContext[]): string {

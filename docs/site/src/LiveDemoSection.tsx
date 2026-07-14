@@ -202,7 +202,7 @@ function LiveDemoSection() {
             letterSpacing: '-0.03em',
           }}
         >
-          Capture, consolidate, retrieve. One Atlas pipeline.
+          Pull detail beyond the context window, one Atlas pipeline at a time.
         </h2>
         <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
           Every hook, cron run, and tool call on the left maps to a real write or query on the right: no invented steps.

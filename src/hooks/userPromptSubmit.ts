@@ -87,6 +87,16 @@ export interface UserPromptSubmitHookDeps {
   hookWriteTimeoutMs: number;
 }
 
+export interface UserPromptSubmitHookResult {
+  outcome: UserPromptSubmitHookOutcome;
+  /**
+   * Only set when outcome is "timeout": the still in-flight write, with
+   * errors already swallowed, so main() can await it before closeDb() runs
+   * instead of severing the connection mid-insert.
+   */
+  pendingWrite: Promise<void> | null;
+}
+
 /**
  * Hook orchestrator with two deliberate behaviors:
  *
@@ -106,9 +116,9 @@ export interface UserPromptSubmitHookDeps {
 export async function runUserPromptSubmitHook(
   input: UserPromptSubmitInput,
   deps: UserPromptSubmitHookDeps
-): Promise<UserPromptSubmitHookOutcome> {
+): Promise<UserPromptSubmitHookResult> {
   const promptText = resolvePromptText(input);
-  if (!shouldCaptureAsHashLine(promptText)) return "skipped";
+  if (!shouldCaptureAsHashLine(promptText)) return { outcome: "skipped", pendingWrite: null };
 
   try {
     const write = (async () => {
@@ -129,9 +139,14 @@ export async function runUserPromptSubmitHook(
       timer.unref?.();
     });
 
-    return await Promise.race([write, timeout]);
+    const outcome = await Promise.race([write, timeout]);
+
+    if (outcome === "timeout") {
+      return { outcome, pendingWrite: write.then(() => undefined).catch(() => undefined) };
+    }
+    return { outcome, pendingWrite: null };
   } catch {
-    return "error";
+    return { outcome: "error", pendingWrite: null };
   }
 }
 
@@ -152,6 +167,7 @@ async function main(): Promise<void> {
   // Everything routes through the single process.exit(0) at the end of the
   // finally block below, never an early process.exit() inside try: exit()
   // terminates the process immediately and skips any later finally.
+  let pendingWrite: Promise<void> | null = null;
   try {
     const raw = await readStdin();
     const input = JSON.parse(raw) as UserPromptSubmitInput;
@@ -168,22 +184,29 @@ async function main(): Promise<void> {
 
     const config = loadConfig();
 
-    const outcome = await runUserPromptSubmitHook(input, {
+    const result = await runUserPromptSubmitHook(input, {
       getDb,
       writeObservation,
       getProjectKey,
       hookWriteTimeoutMs: config.hookWriteTimeoutMs,
     });
+    pendingWrite = result.pendingWrite;
 
     // A hash-line capture is an explicit user request to remember; if it was
     // lost (timeout or error), leave one line of local telemetry.
-    if (outcome === "timeout" || outcome === "error") {
-      appendFailure(`userPromptSubmit.${outcome}`, "CaptureFailed");
+    if (result.outcome === "timeout" || result.outcome === "error") {
+      appendFailure(`userPromptSubmit.${result.outcome}`, "CaptureFailed");
     }
   } catch (err) {
     // Fail open: never let a hook throw. Leave one line of local telemetry.
     appendFailure("userPromptSubmit", err);
   } finally {
+    // Await any still-in-flight write before closing the DB connection: a
+    // timeout outcome means the write raced past its budget, not that it was
+    // abandoned, so closeDb() must not sever it mid-insert.
+    if (pendingWrite) {
+      await pendingWrite;
+    }
     try {
       await closeDb();
     } catch {

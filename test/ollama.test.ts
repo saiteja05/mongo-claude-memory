@@ -228,7 +228,7 @@ describe("callWithTool", () => {
   });
 
   it("aborts a hung request once LLM_TIMEOUT_MS elapses instead of waiting forever", async () => {
-    process.env.LLM_TIMEOUT_MS = "10";
+    process.env.LLM_TIMEOUT_MS = "150";
     // A fetch that never resolves on its own; it only rejects when the
     // caller's AbortController fires.
     const fetchMock = vi.fn(

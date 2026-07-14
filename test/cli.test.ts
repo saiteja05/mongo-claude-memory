@@ -230,6 +230,45 @@ describe("main (default consolidation path)", () => {
   });
 });
 
+describe("main (configuration error before any DB connection)", () => {
+  it("logs only the error name, never err.message (may embed a raw connection string), when loadConfig() throws", async () => {
+    loadConfig.mockImplementation(() => {
+      throw new Error("invalid connection string: mongodb+srv://user:supersecret@cluster0.example.mongodb.net/");
+    });
+
+    setArgs("my-project");
+    await main();
+
+    expect(getDb).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const logged = String(errorSpy.mock.calls[0][0]);
+    expect(logged).toContain("configuration error");
+    expect(logged).toContain("Error");
+    expect(logged).not.toContain("mongodb+srv://");
+    expect(logged).not.toContain("supersecret");
+  });
+});
+
+describe("main (unexpected failure reachable before a validated DB connection)", () => {
+  it("logs only the error name, never err.message, when getDb() rejects with an error embedding the connection string", async () => {
+    loadConfig.mockReturnValue(makeConfig());
+    getDb.mockRejectedValue(
+      new Error("connect failed: mongodb+srv://user:supersecret@cluster0.example.mongodb.net/")
+    );
+
+    setArgs("my-project");
+    await main();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const logged = String(errorSpy.mock.calls[0][0]);
+    expect(logged).toContain("unexpected failure");
+    expect(logged).toContain("Error");
+    expect(logged).not.toContain("mongodb+srv://");
+    expect(logged).not.toContain("supersecret");
+    expect(process.exitCode).toBe(1);
+  });
+});
+
 describe("main (--status subcommand)", () => {
   it("runs the status report and never touches the ANTHROPIC_API_KEY check", async () => {
     loadConfig.mockReturnValue(makeConfig({ anthropicApiKey: undefined }));

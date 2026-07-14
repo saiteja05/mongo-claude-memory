@@ -25,6 +25,11 @@ const ENV_KEYS = [
   "CONSOLIDATION_RECLAIM_MS",
   "CONSOLIDATION_BELIEFS_CONTEXT_LIMIT",
   "CONSOLIDATION_DEDUPE_THRESHOLD",
+  "CONSOLIDATION_RECONCILE_THRESHOLD",
+  "CONSOLIDATION_RECONCILE_MAX_PAIRS",
+  "TRANSCRIPT_CAPTURE_MAX_CHARS",
+  "DROPPED_CANDIDATE_TTL_DAYS",
+  "BRIEF_CACHE_MAX_AGE_DAYS",
   "EMBEDDING_MODE",
   "RERANK_MODE",
 ] as const;
@@ -108,6 +113,57 @@ describe("loadConfig", () => {
     expect(config.voyageBaseUrl).toBe("https://api.voyageai.com");
   });
 
+  describe("briefCacheMaxAgeDays (BRIEF_CACHE_MAX_AGE_DAYS)", () => {
+    it("defaults to 7 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.briefCacheMaxAgeDays).toBe(7);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.BRIEF_CACHE_MAX_AGE_DAYS = "14";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.briefCacheMaxAgeDays).toBe(14);
+    });
+
+    it("accepts 0, which disables cache reads", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.BRIEF_CACHE_MAX_AGE_DAYS = "0";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.briefCacheMaxAgeDays).toBe(0);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.BRIEF_CACHE_MAX_AGE_DAYS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.briefCacheMaxAgeDays).toBe(7);
+    });
+
+    it("falls back to the default when the override is below 0", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.BRIEF_CACHE_MAX_AGE_DAYS = "-1";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.briefCacheMaxAgeDays).toBe(7);
+    });
+  });
+
   it("sessionStartTimeoutMs falls back to an explicitly tuned HOOK_INTERNAL_TIMEOUT_MS", async () => {
     process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
     process.env.HOOK_INTERNAL_TIMEOUT_MS = "1200";
@@ -139,6 +195,88 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.hookWriteTimeoutMs).toBe(9000);
+  });
+
+  describe("transcriptCaptureMaxChars (TRANSCRIPT_CAPTURE_MAX_CHARS)", () => {
+    it("defaults to 500000 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.transcriptCaptureMaxChars).toBe(500000);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.TRANSCRIPT_CAPTURE_MAX_CHARS = "750000";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.transcriptCaptureMaxChars).toBe(750000);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.TRANSCRIPT_CAPTURE_MAX_CHARS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.transcriptCaptureMaxChars).toBe(500000);
+    });
+
+    it("falls back to the default when the override is below the 50000 floor", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.TRANSCRIPT_CAPTURE_MAX_CHARS = "10";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.transcriptCaptureMaxChars).toBe(500000);
+    });
+  });
+
+  describe("droppedCandidateTtlDays (DROPPED_CANDIDATE_TTL_DAYS)", () => {
+    it("defaults to 30 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.droppedCandidateTtlDays).toBe(30);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.DROPPED_CANDIDATE_TTL_DAYS = "60";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.droppedCandidateTtlDays).toBe(60);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.DROPPED_CANDIDATE_TTL_DAYS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.droppedCandidateTtlDays).toBe(30);
+    });
+
+    it("falls back to the default when the override is below the 1 floor", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.DROPPED_CANDIDATE_TTL_DAYS = "0";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.droppedCandidateTtlDays).toBe(30);
+    });
   });
 
   it("respects an explicit VOYAGE_BASE_URL override", async () => {
@@ -198,6 +336,108 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.dedupeSimilarityThreshold).toBe(0.93);
+  });
+
+  it("falls back to the default dedupeSimilarityThreshold when the override is below 0", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.CONSOLIDATION_DEDUPE_THRESHOLD = "-0.1";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.dedupeSimilarityThreshold).toBe(0.93);
+  });
+
+  it("falls back to the default dedupeSimilarityThreshold when the override is above 1", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.CONSOLIDATION_DEDUPE_THRESHOLD = "1.1";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.dedupeSimilarityThreshold).toBe(0.93);
+  });
+
+  describe("reconcileSimilarityThreshold (CONSOLIDATION_RECONCILE_THRESHOLD)", () => {
+    it("defaults to 0.75 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileSimilarityThreshold).toBe(0.75);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_THRESHOLD = "0.5";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileSimilarityThreshold).toBe(0.5);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_THRESHOLD = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileSimilarityThreshold).toBe(0.75);
+    });
+
+    it("falls back to the default when the override is out of the 0 to 1 bound", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_THRESHOLD = "1.5";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileSimilarityThreshold).toBe(0.75);
+    });
+  });
+
+  describe("reconcileMaxPairs (CONSOLIDATION_RECONCILE_MAX_PAIRS)", () => {
+    it("defaults to 25 when unset", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileMaxPairs).toBe(25);
+    });
+
+    it("respects an explicit override", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_MAX_PAIRS = "10";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileMaxPairs).toBe(10);
+    });
+
+    it("falls back to the default when the override is not numeric", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_MAX_PAIRS = "not-a-number";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileMaxPairs).toBe(25);
+    });
+
+    it("falls back to the default when the override is below the 1 floor", async () => {
+      process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+      process.env.CONSOLIDATION_RECONCILE_MAX_PAIRS = "0";
+
+      const { loadConfig } = await import("../src/config.js");
+      const config = loadConfig();
+
+      expect(config.reconcileMaxPairs).toBe(25);
+    });
   });
 
   it("falls back to the default claimBatchSize when CONSOLIDATION_BATCH_SIZE is not numeric", async () => {
@@ -363,6 +603,26 @@ describe("loadConfig", () => {
     expect(config.claimBatchSize).toBe(10);
   });
 
+  it("falls back to the default claimBatchSize when CONSOLIDATION_BATCH_SIZE is 0", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.CONSOLIDATION_BATCH_SIZE = "0";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.claimBatchSize).toBe(50);
+  });
+
+  it("falls back to the default claimBatchSize when CONSOLIDATION_BATCH_SIZE is negative", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.CONSOLIDATION_BATCH_SIZE = "-5";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.claimBatchSize).toBe(50);
+  });
+
   it("defaults reclaimAfterMs when CONSOLIDATION_RECLAIM_MS is unset", async () => {
     process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
 
@@ -374,12 +634,22 @@ describe("loadConfig", () => {
 
   it("respects an explicit CONSOLIDATION_RECLAIM_MS override", async () => {
     process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
+    process.env.CONSOLIDATION_RECLAIM_MS = "9990";
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.reclaimAfterMs).toBe(9990);
+  });
+
+  it("falls back to the default reclaimAfterMs when CONSOLIDATION_RECLAIM_MS is below the 1000ms floor", async () => {
+    process.env.MEMORY_MONGODB_URI = "mongodb://localhost:27017";
     process.env.CONSOLIDATION_RECLAIM_MS = "999";
 
     const { loadConfig } = await import("../src/config.js");
     const config = loadConfig();
 
-    expect(config.reclaimAfterMs).toBe(999);
+    expect(config.reclaimAfterMs).toBe(600000);
   });
 
   it("defaults beliefsContextLimit when CONSOLIDATION_BELIEFS_CONTEXT_LIMIT is unset", async () => {

@@ -223,11 +223,14 @@ All configuration is loaded by `loadConfig()` in `src/config.ts`. Nothing is req
 | `VOYAGE_BASE_URL` | `https://api.voyageai.com` | Set to `https://ai.mongodb.com` to use an Atlas model API key instead of a native Voyage key |
 | `BRIEF_CORE_TOKEN_CAP` | `800` | Token cap for the global (`core`) brief |
 | `BRIEF_PROJECT_TOKEN_CAP` | `1200` | Token cap for the per-project brief |
+| `BRIEF_CACHE_MAX_AGE_DAYS` | `7` | Max age of the local brief cache served when Atlas is unreachable; 0 disables cache reads |
 | `SESSION_START_TIMEOUT_MS` | `3000` | Fail-open budget for `SessionStart`'s brief fetch. When unset, falls back to `HOOK_INTERNAL_TIMEOUT_MS` if that is set, else 3000 (cold Atlas connects need more than the 800ms general default) |
 | `HOOK_INTERNAL_TIMEOUT_MS` | `800` | General hook-internal fail-open default; also the `SessionStart` fallback when `SESSION_START_TIMEOUT_MS` is unset |
 | `HOOK_WRITE_TIMEOUT_MS` | `5000` | Budget for the `UserPromptSubmit` hash-line capture write. Explicit remember requests get a longer budget so an in-flight insert is not killed mid-write |
 | `OBSERVATION_TTL_DAYS` | `30` | TTL for normal-priority observations |
+| `DROPPED_CANDIDATE_TTL_DAYS` | `30` | Retention for quarantined dropped candidate facts |
 | `SESSION_END_TIMEOUT_MS` | `5000` | Fail-open budget for the `SessionEnd` hook |
+| `TRANSCRIPT_CAPTURE_MAX_CHARS` | `500000` | Total `SessionEnd` transcript capture budget in characters, chunked into 50k observations with the first chunk plus most recent kept |
 | `ANTHROPIC_API_KEY` | none | Required for fact extraction when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Extraction model |
 | `LLM_PROVIDER` | `anthropic` | `anthropic`, `bedrock`, or `ollama` |
@@ -242,6 +245,8 @@ All configuration is loaded by `loadConfig()` in `src/config.ts`. Nothing is req
 | `CONSOLIDATION_RECLAIM_MS` | `600000` | Age after which a stale `claimed` observation is reclaimed to `pending`; also the age at which a crashed run's project is rediscovered by the no-argument consolidator |
 | `CONSOLIDATION_BELIEFS_CONTEXT_LIMIT` | `30` | Existing beliefs passed to the LLM as dedup/context (most recently updated first) |
 | `CONSOLIDATION_DEDUPE_THRESHOLD` | `0.93` | Vector similarity threshold above which a candidate fact is treated as a duplicate of an existing belief |
+| `CONSOLIDATION_RECONCILE_THRESHOLD` | `0.75` | Similarity floor for the write-time reconciliation probe; 1 disables reconciliation entirely |
+| `CONSOLIDATION_RECONCILE_MAX_PAIRS` | `25` | Cap on LLM arbitration calls per `--reconcile` sweep |
 | `EMBEDDING_MODE` | `appside` | `appside` or `auto` (see Configuration modes) |
 | `RERANK_MODE` | `auto` | `auto`, `native`, or `appside` (see Configuration modes) |
 | `MEMORY_PROJECT_KEY_MODE` | `path` | `path` keys memory by the local `.git` directory path (stable per machine/clone); `remote` keys by the normalized `remote.origin.url`, so every clone on every machine shares one key. Switching modes re-keys project memory: beliefs stored under the old key stay there. `remote` falls back to `path` when there is no origin remote |

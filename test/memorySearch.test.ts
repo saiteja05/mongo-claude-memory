@@ -191,6 +191,37 @@ describe("runMemorySearch", () => {
     expect(updateUseCount).not.toHaveBeenCalled();
   });
 
+  it("falls back to text-only (appside embedding mode) when both the full and vector-only pipelines fail", async () => {
+    const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+    const embed = vi.fn(async () => [[0.1, 0.2]]);
+    const rerank = vi.fn(async () => []);
+    const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+      if (hasStage(pipeline, "$rankFusion")) {
+        throw new Error("Unrecognized pipeline stage name: '$rankFusion'");
+      }
+      if (hasStage(pipeline, "$vectorSearch")) {
+        throw new Error("Unrecognized pipeline stage name: '$vectorSearch'");
+      }
+      return baseDocs;
+    });
+    const updateUseCount = vi.fn(async () => undefined);
+
+    const result = await runMemorySearch(
+      fakeDb,
+      { query: "tabs vs spaces", project: "myrepo-abc" },
+      { embed, rerank, aggregate, updateUseCount }
+    );
+
+    expect(result.degraded).toBe("text-only: vector search unavailable");
+    const successfulBaseCall = aggregate.mock.calls.find(
+      (call) => !hasStage(call[1], "$rankFusion") && !hasStage(call[1], "$vectorSearch")
+    );
+    expect(successfulBaseCall).toBeDefined();
+    expect(successfulBaseCall![1][0].$search).toMatchObject({ index: "beliefs_text" });
+    expect(result.results).toHaveLength(2);
+  });
+
   it("returns an empty array with a degraded reason when text-only also fails (no vector arm available)", async () => {
     const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
 
@@ -523,6 +554,64 @@ describe("runMemorySearch", () => {
       expect(aggregate).toHaveBeenCalledTimes(1);
       expect(rerank).toHaveBeenCalledTimes(1);
       expect(result.results[0]._id).toBe("b2");
+    });
+
+    it("appside: sets a degraded reason (instead of leaving it null) when the Voyage rerank fallback itself fails", async () => {
+      process.env.RERANK_MODE = "appside";
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => {
+        throw new Error("Voyage rerank is down");
+      });
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rerank")) {
+          throw new Error("appside mode must never issue a $rerank stage");
+        }
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+
+      const result = await runMemorySearch(
+        fakeDb,
+        { query: "q", project: "myrepo-abc" },
+        { embed, rerank, aggregate, updateUseCount }
+      );
+
+      expect(result.degraded).toBe("unranked: Voyage rerank unavailable");
+      expect(result.results).toHaveLength(2);
+    });
+
+    it("auto: sets a degraded reason (instead of leaving it null) when native $rerank fails and the Voyage fallback also fails, on both the probe path and the cached-unavailable path", async () => {
+      const { runMemorySearch } = await import("../src/mcp/memorySearch.js");
+
+      const embed = vi.fn(async () => [[0.1, 0.2]]);
+      const rerank = vi.fn(async () => {
+        throw new Error("Voyage rerank is down");
+      });
+      const aggregate = vi.fn(async (_db: any, pipeline: any[]) => {
+        if (hasStage(pipeline, "$rerank")) {
+          throw new Error("Unrecognized pipeline stage name: '$rerank'");
+        }
+        return baseDocs;
+      });
+      const updateUseCount = vi.fn(async () => undefined);
+      const deps = { embed, rerank, aggregate, updateUseCount };
+
+      const first = await runMemorySearch(fakeDb, { query: "q1", project: "myrepo-abc" }, deps);
+      // Probe path: native $rerank is attempted, fails as unsupported (and
+      // negatively cached), then the Voyage fallback is attempted and also fails.
+      expect(first.degraded).toBe("unranked: native and Voyage rerank both unavailable");
+      expect(first.results).toHaveLength(2);
+
+      aggregate.mockClear();
+
+      const second = await runMemorySearch(fakeDb, { query: "q2", project: "myrepo-abc" }, deps);
+      // Cached-unavailable path: native $rerank is skipped entirely (cache says
+      // unavailable), straight to the Voyage fallback, which also fails.
+      expect(hasStage(aggregate.mock.calls[0][1], "$rerank")).toBe(false);
+      expect(second.degraded).toBe("unranked: native and Voyage rerank both unavailable");
+      expect(second.results).toHaveLength(2);
     });
   });
 });

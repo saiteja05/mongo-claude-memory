@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { ObjectId } from "mongodb";
-import { upsertBelief, findSimilarBelief } from "../src/consolidation/upsertBelief.js";
+import { upsertBelief, findSimilarBelief, findSimilarBeliefs } from "../src/consolidation/upsertBelief.js";
 import type { CandidateFact } from "../src/consolidation/extractFacts.js";
+import type { ReconcileVerdict } from "../src/consolidation/reconcileBelief.js";
 
 function makeCandidate(overrides: Partial<CandidateFact> = {}): CandidateFact {
   return {
@@ -100,11 +104,11 @@ describe("upsertBelief", () => {
     expect(update.$inc.version).toBe(1);
   });
 
-  it("inserts a new belief instead of a false update when the matched belief was archived or tombstoned concurrently (updateOne matchedCount 0)", async () => {
+  it("inserts a new belief instead of a false update when the CAS-guarded update stays contested for all 3 attempts (updateOne matchedCount 0 every time)", async () => {
     const existingId = new ObjectId().toString();
-    const { db, updateOne, insertOne } = makeFakeBeliefsDb({
+    const { db, updateOne, insertOne, findOne } = makeFakeBeliefsDb({
       aggregateResults: [{ _id: existingId, text: "old text", score: 0.97 }],
-      findOneResult: { _id: existingId, text: "old text", observation_ids: ["obs-0"] },
+      findOneResult: { _id: existingId, text: "old text", observation_ids: ["obs-0"], version: 1 },
       updateOneResult: { matchedCount: 0, modifiedCount: 0 },
     });
 
@@ -113,11 +117,78 @@ describe("upsertBelief", () => {
 
     expect(result.action).not.toBe("update");
     expect(result.action).toBe("insert");
-    expect(updateOne).toHaveBeenCalledTimes(1);
+    // 3 CAS-guarded attempts, each re-reading the belief before retrying.
+    expect(updateOne).toHaveBeenCalledTimes(3);
+    expect(findOne).toHaveBeenCalledTimes(3);
     expect(insertOne).toHaveBeenCalledTimes(1);
     const [doc] = insertOne.mock.calls[0];
     expect(doc.text).toBe("new merged text");
     expect(doc.status).toBe("active");
+  });
+
+  it("retries the compare-and-swap update after a concurrent write changes the belief's version, succeeding against the freshly-read document", async () => {
+    const existingId = new ObjectId().toString();
+    const aggregate = vi.fn(() => ({
+      toArray: async () => [{ _id: existingId, text: "old text", score: 0.97 }],
+    }));
+    const findOne = vi
+      .fn()
+      .mockResolvedValueOnce({ _id: existingId, text: "old text", observation_ids: ["obs-0"], version: 1 })
+      .mockResolvedValueOnce({
+        _id: existingId,
+        text: "concurrently updated text",
+        observation_ids: ["obs-0", "obs-99"],
+        version: 2,
+      });
+    const updateOne = vi
+      .fn()
+      .mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+      .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 1 });
+    const insertOne = vi.fn(async () => ({ insertedId: new ObjectId() }));
+    const db = { collection: () => ({ aggregate, findOne, updateOne, insertOne }) };
+
+    const candidate = makeCandidate({ text: "new merged text", observation_ids: ["obs-1"] });
+    const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93);
+
+    expect(result).toEqual({ beliefId: existingId, action: "update" });
+    expect(insertOne).not.toHaveBeenCalled();
+    expect(findOne).toHaveBeenCalledTimes(2);
+    expect(updateOne).toHaveBeenCalledTimes(2);
+
+    const [firstFilter] = updateOne.mock.calls[0];
+    expect(firstFilter.version).toBe(1);
+    const [secondFilter, secondUpdate] = updateOne.mock.calls[1];
+    expect(secondFilter.version).toBe(2);
+    // Recomputed against the freshly-read document: merges the
+    // concurrently-added obs-99 as well as this candidate's own obs-1.
+    expect(secondUpdate.$set.observation_ids.sort()).toEqual(["obs-0", "obs-1", "obs-99"]);
+    expect(secondUpdate.$set.text).toBe("new merged text");
+  });
+
+  it("falls through to the insert path when the belief has gone inactive by the time the CAS retry re-fetches it", async () => {
+    const existingId = new ObjectId().toString();
+    const aggregate = vi.fn(() => ({
+      toArray: async () => [{ _id: existingId, text: "old text", score: 0.97 }],
+    }));
+    const findOne = vi
+      .fn()
+      .mockResolvedValueOnce({ _id: existingId, text: "old text", observation_ids: ["obs-0"], version: 1 })
+      .mockResolvedValueOnce(null);
+    const updateOne = vi.fn().mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 });
+    const insertOne = vi.fn(async () => ({ insertedId: new ObjectId() }));
+    const db = { collection: () => ({ aggregate, findOne, updateOne, insertOne }) };
+
+    const candidate = makeCandidate({ text: "new merged text", observation_ids: ["obs-1"] });
+    const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93);
+
+    expect(result.action).toBe("insert");
+    // Only one CAS attempt: the retry's re-fetch came back null (no longer
+    // active), so the loop stops instead of retrying against nothing.
+    expect(updateOne).toHaveBeenCalledTimes(1);
+    expect(findOne).toHaveBeenCalledTimes(2);
+    expect(insertOne).toHaveBeenCalledTimes(1);
+    const [doc] = insertOne.mock.calls[0];
+    expect(doc.text).toBe("new merged text");
   });
 
   it("inserts a new belief when there is no close match", async () => {
@@ -382,6 +453,243 @@ describe("upsertBelief", () => {
       const [, update] = updateOne.mock.calls[0];
       expect(update.$set.text).toBe("first stamped text");
       expect(update.$set.last_evidence_at).toEqual(older);
+    });
+  });
+
+  describe("insert-path reconciliation", () => {
+    // Below the dedupe threshold (0.93) but at or above a typical reconcile
+    // threshold (0.75), so the same fake aggregate results exercise both
+    // probes: the dedupe probe filters this out (similar stays null) while
+    // the reconcile probe keeps it (near has one entry).
+    const reconcileThreshold = 0.75;
+    const nearScore = 0.8;
+
+    it("does not call the injected reconcile fn when the reconcile probe finds no near matches (plain insert runs)", async () => {
+      const { db, aggregate, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+      const reconcile = vi.fn(async (): Promise<ReconcileVerdict[]> => []);
+
+      const result = await upsertBelief(
+        db as any,
+        "proj",
+        makeCandidate(),
+        [0.1, 0.2],
+        0.93,
+        {},
+        undefined,
+        { threshold: reconcileThreshold, reconcile }
+      );
+
+      expect(result.action).toBe("insert");
+      // dedupe probe + reconcile probe, both empty.
+      expect(aggregate).toHaveBeenCalledTimes(2);
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(insertOne).toHaveBeenCalledTimes(1);
+    });
+
+    it("archives the target via a status-filtered CAS updateOne and inserts the new belief with a supersedes pointer on a 'supersedes' verdict", async () => {
+      const targetId = new ObjectId().toString();
+      const { db, aggregate, updateOne, insertOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: targetId, text: "old rate-limit fact", score: nearScore }],
+      });
+      const reconcile = vi.fn(
+        async (): Promise<ReconcileVerdict[]> => [{ beliefId: targetId, verdict: "supersedes" }]
+      );
+
+      const candidate = makeCandidate({ text: "the rate limit is actually 20 requests/sec" });
+      const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: reconcileThreshold,
+        reconcile,
+      });
+
+      expect(aggregate).toHaveBeenCalledTimes(2);
+      expect(reconcile).toHaveBeenCalledWith(candidate.text, [
+        { _id: targetId, text: "old rate-limit fact", score: nearScore },
+      ]);
+      expect(updateOne).toHaveBeenCalledTimes(1);
+      const [archiveFilter, archiveUpdate] = updateOne.mock.calls[0];
+      expect(archiveFilter.project).toBe("proj");
+      expect(archiveFilter.status).toBe("active");
+      expect(String(archiveFilter._id)).toBe(targetId);
+      expect(archiveUpdate.$set.status).toBe("archived");
+      expect(archiveUpdate.$inc.version).toBe(1);
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      const [doc] = insertOne.mock.calls[0];
+      expect(doc.supersedes).toBe(targetId);
+      expect(doc.text).toBe(candidate.text);
+      expect(doc.status).toBe("active");
+      expect(result.action).toBe("supersede");
+    });
+
+    it("falls through to a plain insert with no supersedes pointer when the 'supersedes' archive's CAS matchedCount is 0 (archived meanwhile)", async () => {
+      const targetId = new ObjectId().toString();
+      const { db, updateOne, insertOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: targetId, text: "old rate-limit fact", score: nearScore }],
+        updateOneResult: { matchedCount: 0, modifiedCount: 0 },
+      });
+      const reconcile = vi.fn(
+        async (): Promise<ReconcileVerdict[]> => [{ beliefId: targetId, verdict: "supersedes" }]
+      );
+
+      const candidate = makeCandidate({ text: "the rate limit is actually 20 requests/sec" });
+      const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: reconcileThreshold,
+        reconcile,
+      });
+
+      expect(updateOne).toHaveBeenCalledTimes(1);
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      const [doc] = insertOne.mock.calls[0];
+      expect(doc.supersedes).toBeNull();
+      expect(result.action).toBe("insert");
+    });
+
+    it("routes a 'duplicate' verdict through the merge path (action 'update')", async () => {
+      const targetId = new ObjectId().toString();
+      const { db, aggregate, findOne, updateOne, insertOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: targetId, text: "old rate-limit fact", score: nearScore }],
+        findOneResult: {
+          _id: targetId,
+          text: "old rate-limit fact",
+          observation_ids: ["obs-0"],
+          version: 1,
+        },
+      });
+      const reconcile = vi.fn(
+        async (): Promise<ReconcileVerdict[]> => [{ beliefId: targetId, verdict: "duplicate" }]
+      );
+
+      const candidate = makeCandidate({ text: "the rate limit is 20 requests/sec", observation_ids: ["obs-1"] });
+      const result = await upsertBelief(db as any, "proj", candidate, [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: reconcileThreshold,
+        reconcile,
+      });
+
+      expect(aggregate).toHaveBeenCalledTimes(2);
+      expect(findOne).toHaveBeenCalledTimes(1);
+      expect(updateOne).toHaveBeenCalledTimes(1);
+      expect(insertOne).not.toHaveBeenCalled();
+      expect(result).toEqual({ beliefId: targetId, action: "update" });
+    });
+
+    it("produces a plain insert on an 'unrelated' verdict", async () => {
+      const targetId = new ObjectId().toString();
+      const { db, updateOne, insertOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: targetId, text: "unrelated fact", score: nearScore }],
+      });
+      const reconcile = vi.fn(
+        async (): Promise<ReconcileVerdict[]> => [{ beliefId: targetId, verdict: "unrelated" }]
+      );
+
+      const result = await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: reconcileThreshold,
+        reconcile,
+      });
+
+      expect(updateOne).not.toHaveBeenCalled();
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      expect(result.action).toBe("insert");
+    });
+
+    it("produces a plain insert and logs via appendFailure when the injected reconcile fn throws", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-upsert-reconcile-"));
+      const logFile = path.join(dir, "failures.log");
+      const savedLog = process.env.MEMORY_FAILURE_LOG;
+      process.env.MEMORY_FAILURE_LOG = logFile;
+
+      try {
+        const targetId = new ObjectId().toString();
+        const { db, insertOne } = makeFakeBeliefsDb({
+          aggregateResults: [{ _id: targetId, text: "some fact", score: nearScore }],
+        });
+        const reconcile = vi.fn(async (): Promise<ReconcileVerdict[]> => {
+          throw new Error("reconcile provider timed out");
+        });
+
+        const result = await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93, {}, undefined, {
+          threshold: reconcileThreshold,
+          reconcile,
+        });
+
+        expect(insertOne).toHaveBeenCalledTimes(1);
+        expect(result.action).toBe("insert");
+        const content = readFileSync(logFile, "utf8");
+        expect(content).toContain("reconcileBelief.upsert");
+      } finally {
+        if (savedLog === undefined) delete process.env.MEMORY_FAILURE_LOG;
+        else process.env.MEMORY_FAILURE_LOG = savedLog;
+      }
+    });
+
+    it("produces a plain insert when the injected reconcile fn resolves with an empty verdict list", async () => {
+      const targetId = new ObjectId().toString();
+      const { db, updateOne, insertOne } = makeFakeBeliefsDb({
+        aggregateResults: [{ _id: targetId, text: "some fact", score: nearScore }],
+      });
+      const reconcile = vi.fn(async (): Promise<ReconcileVerdict[]> => []);
+
+      const result = await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: reconcileThreshold,
+        reconcile,
+      });
+
+      expect(updateOne).not.toHaveBeenCalled();
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      expect(result.action).toBe("insert");
+    });
+
+    it("makes exactly one aggregate call (the dedupe probe) and leaves behavior unchanged when reconcileOptions is absent", async () => {
+      const { db, aggregate, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+
+      const result = await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93);
+
+      expect(aggregate).toHaveBeenCalledTimes(1);
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      expect(result.action).toBe("insert");
+    });
+
+    it("short-circuits with no second aggregate call when reconcileOptions.threshold is >= 1", async () => {
+      const { db, aggregate, insertOne } = makeFakeBeliefsDb({ aggregateResults: [] });
+      const reconcile = vi.fn(async (): Promise<ReconcileVerdict[]> => []);
+
+      const result = await upsertBelief(db as any, "proj", makeCandidate(), [0.1, 0.2], 0.93, {}, undefined, {
+        threshold: 1,
+        reconcile,
+      });
+
+      expect(aggregate).toHaveBeenCalledTimes(1);
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(insertOne).toHaveBeenCalledTimes(1);
+      expect(result.action).toBe("insert");
+    });
+
+    it("findSimilarBeliefs returns up to k results filtered by threshold, and findSimilarBelief still returns the top-1 match or null", async () => {
+      const idHigh = new ObjectId().toString();
+      const idMid = new ObjectId().toString();
+      const idLow = new ObjectId().toString();
+      const { db, aggregate } = makeFakeBeliefsDb({
+        aggregateResults: [
+          { _id: idHigh, text: "high match", score: 0.95 },
+          { _id: idMid, text: "mid match", score: 0.8 },
+          { _id: idLow, text: "low match", score: 0.4 },
+        ],
+      });
+
+      const results = await findSimilarBeliefs(db as any, "proj", "project", [0.1, 0.2], reconcileThreshold, 3);
+
+      expect(results).toEqual([
+        { _id: idHigh, text: "high match", score: 0.95 },
+        { _id: idMid, text: "mid match", score: 0.8 },
+      ]);
+      const [pipeline] = aggregate.mock.calls[0];
+      expect((pipeline[0] as any).$vectorSearch.limit).toBe(3);
+      expect((pipeline[0] as any).$vectorSearch.numCandidates).toBe(100);
+
+      const top = await findSimilarBelief(db as any, "proj", "project", [0.1, 0.2], reconcileThreshold);
+      expect(top).toEqual({ _id: idHigh, text: "high match", score: 0.95 });
+
+      const { db: dbEmpty } = makeFakeBeliefsDb({ aggregateResults: [] });
+      const none = await findSimilarBelief(dbEmpty as any, "proj", "project", [0.1, 0.2], 0.93);
+      expect(none).toBeNull();
     });
   });
 });

@@ -192,7 +192,7 @@ describe("bedrock callWithTool", () => {
   });
 
   it("aborts a hung Converse request once LLM_TIMEOUT_MS elapses via the abortSignal passed to send", async () => {
-    process.env.LLM_TIMEOUT_MS = "10";
+    process.env.LLM_TIMEOUT_MS = "150";
     // A send that never resolves on its own; it only rejects when the
     // abortSignal passed in the send options fires.
     sendMock.mockImplementation(

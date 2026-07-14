@@ -557,7 +557,7 @@ function HowItWorksVisual() {
     <section id="pipeline" className="relative w-full bg-[#f7f5ef] py-16 sm:py-20 md:py-28 px-4 sm:px-6 overflow-hidden">
       <div className="max-w-5xl mx-auto text-center mb-12 sm:mb-16">
         <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
-          One MongoDB Platform
+          Capture, Consolidate, Retrieve
         </span>
         <h2
           className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
@@ -567,7 +567,7 @@ function HowItWorksVisual() {
             letterSpacing: '-0.03em',
           }}
         >
-          Capture. Consolidate. Retrieve.
+          Ground agents with MongoDB.
         </h2>
         <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
           Four independent writers feed one offline consolidator. Every session starts from a small, ranked brief.

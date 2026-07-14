@@ -63,6 +63,14 @@ function makeFakeDb(observations: FakeObservation[], beliefs: FakeBelief[]) {
         },
       };
     },
+    async findOne(filter: { supersedes?: string; status?: string }) {
+      const doc = beliefState.find(
+        (b) =>
+          (filter.supersedes === undefined || b.supersedes === filter.supersedes) &&
+          (filter.status === undefined || b.status === filter.status)
+      );
+      return doc ?? null;
+    },
     async updateOne(filter: { _id: unknown; version?: number; status?: string }, update: any) {
       const doc = beliefState.find((b) => matchId(b._id, filter._id));
       if (!doc) return { matchedCount: 0, modifiedCount: 0 };
@@ -425,6 +433,73 @@ describe("runRollback", () => {
     expect(restored.status).toBe("active");
     // Every mutation bumps version, the restore included.
     expect(restored.version).toBe(4);
+  });
+
+  it("skips restoring the superseded belief and reports it for manual review when a newer belief has since superseded the one being rolled back and is still active", async () => {
+    const oldBeliefId = new ObjectId().toString(); // grandparent, archived when superseded
+    const rolledBackBeliefId = new ObjectId().toString(); // this run's belief, gets tombstoned below
+    const newerSuccessorId = new ObjectId().toString(); // supersedes rolledBackBeliefId, still active
+    const { db, beliefState } = makeFakeDb(
+      [{ _id: "obs-1", run_id: "run-a", status: "consolidated" }],
+      [
+        {
+          _id: oldBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "archived",
+          observation_ids: ["obs-0"],
+          supersedes: null,
+          version: 3,
+        },
+        {
+          _id: rolledBackBeliefId,
+          project: "proj",
+          scope: "project",
+          status: "active",
+          observation_ids: ["obs-1"],
+          supersedes: oldBeliefId,
+          version: 1,
+        },
+        {
+          // Written by a different, unrelated run after this run's belief:
+          // its observation_ids never overlap with run-a's, so it is not
+          // itself touched by this rollback at all.
+          _id: newerSuccessorId,
+          project: "proj",
+          scope: "project",
+          status: "active",
+          observation_ids: ["obs-2"],
+          supersedes: rolledBackBeliefId,
+          version: 1,
+        },
+      ]
+    );
+
+    const result = await runRollback(db as any, "run-a", makeDeps());
+
+    expect(result.revertedBeliefs).toEqual([rolledBackBeliefId]);
+    expect(result.restoredBeliefs).toEqual([]);
+    expect(result.needsManualReview).toEqual([
+      {
+        beliefId: oldBeliefId,
+        observationIds: [],
+        runObservationIds: [],
+        reason: "a newer belief has since superseded this one and is still active",
+      },
+    ]);
+
+    const rolledBack = beliefState.find((b) => String(b._id) === rolledBackBeliefId)!;
+    expect(rolledBack.status).toBe("tombstoned");
+
+    // Restoring the grandparent would have produced two simultaneously
+    // active beliefs (it and newerSuccessorId) for the same lineage: it must
+    // stay archived, and the newer successor must be left completely
+    // untouched.
+    const grandparent = beliefState.find((b) => String(b._id) === oldBeliefId)!;
+    expect(grandparent.status).toBe("archived");
+    const newerSuccessor = beliefState.find((b) => String(b._id) === newerSuccessorId)!;
+    expect(newerSuccessor.status).toBe("active");
+    expect(newerSuccessor.version).toBe(1);
   });
 
   it("never resurrects a tombstoned (user-forgotten) superseded belief, reporting it for manual review instead", async () => {

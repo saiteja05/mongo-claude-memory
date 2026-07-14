@@ -423,8 +423,20 @@ async function runBasePipeline(
           degraded: "vector-only: Atlas Search unavailable",
         };
       } catch (err2) {
-        console.error(`[memorySearch] vector-only fallback also failed: ${errMsg(err2)}`);
-        return null;
+        console.error(`[memorySearch] vector-only fallback failed, falling back to text-only: ${errMsg(err2)}`);
+        const textPipeline = buildTextOnlyPipeline(query, project, scope);
+        try {
+          const docs = await aggregate(db, textPipeline);
+          return {
+            docs,
+            pipeline: textPipeline,
+            path: "text-only",
+            degraded: "text-only: vector search unavailable",
+          };
+        } catch (err3) {
+          console.error(`[memorySearch] text-only pipeline also failed: ${errMsg(err3)}`);
+          return null;
+        }
       }
     }
   }
@@ -592,6 +604,9 @@ export async function runMemorySearch(
       const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
       finalDocs = fallback.docs;
       scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
+      if (!fallback.reranked) {
+        degraded = degraded ?? "unranked: Voyage rerank unavailable";
+      }
     } else if (config.rerankMode === "native") {
       // Always attempt native $rerank; on failure, never fall back to the
       // Voyage rerank API, just return the fused results unranked.
@@ -629,6 +644,9 @@ export async function runMemorySearch(
         const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
         finalDocs = fallback.docs;
         scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
+        if (!fallback.reranked) {
+          degraded = degraded ?? "unranked: native and Voyage rerank both unavailable";
+        }
       }
     } else {
       // rerankMode "auto", negative cache says unavailable (and has not yet
@@ -636,6 +654,9 @@ export async function runMemorySearch(
       const fallback = await tryVoyageRerank(baseResults, params.query, limit, rerankFn);
       finalDocs = fallback.docs;
       scoreField = fallback.reranked ? "voyageRerankScore" : "fusionScore";
+      if (!fallback.reranked) {
+        degraded = degraded ?? "unranked: native and Voyage rerank both unavailable";
+      }
     }
   } else {
     // text-only path: rerank is not attempted (DESIGN.md instructs reranking

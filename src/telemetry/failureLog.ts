@@ -24,12 +24,26 @@ export function failureLogPath(): string {
   );
 }
 
+// Caps the log file so an extended outage (bad credentials, network issue)
+// spamming appendFailure on every hook's fail-open path cannot grow it
+// unbounded; past this size the file is rotated to one ".1" backup instead.
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+
 export function appendFailure(component: string, err: unknown): void {
   try {
     const target = failureLogPath();
     fs.mkdirSync(path.dirname(target), { recursive: true });
     const name =
       err instanceof Error ? err.name : typeof err === "string" ? err : "UnknownError";
+    try {
+      const stats = fs.statSync(target);
+      if (stats.size > MAX_LOG_BYTES) {
+        fs.renameSync(target, `${target}.1`);
+      }
+    } catch {
+      // fs.statSync throws when the target does not exist yet (expected on
+      // first run): nothing to rotate, fall through to append below.
+    }
     fs.appendFileSync(target, `${new Date().toISOString()} ${component} ${name}\n`, "utf8");
   } catch {
     // Telemetry must never throw or add a failure mode of its own.

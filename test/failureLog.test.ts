@@ -52,4 +52,36 @@ describe("appendFailure", () => {
     delete process.env.MEMORY_FAILURE_LOG;
     expect(failureLogPath()).toMatch(/\.mongo-claude-memory[/\\]failures\.log$/);
   });
+
+  it("rotates the log to <path>.1 once it exceeds the size cap, before appending the new line", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-faillog-rotate-"));
+    const logFile = path.join(dir, "failures.log");
+    process.env.MEMORY_FAILURE_LOG = logFile;
+
+    const oversized = "x".repeat(5 * 1024 * 1024 + 1);
+    writeFileSync(logFile, oversized, "utf8");
+
+    appendFailure("sessionStart", new Error("boom"));
+
+    expect(readFileSync(`${logFile}.1`, "utf8")).toBe(oversized);
+    const current = readFileSync(logFile, "utf8").trim().split("\n");
+    expect(current).toHaveLength(1);
+    expect(current[0]).toMatch(/ sessionStart Error$/);
+  });
+
+  it("does not rotate, and appends normally, when the log is under the size cap", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-faillog-norotate-"));
+    const logFile = path.join(dir, "failures.log");
+    process.env.MEMORY_FAILURE_LOG = logFile;
+
+    writeFileSync(logFile, "pre-existing line\n", "utf8");
+
+    appendFailure("sessionStart", new Error("boom"));
+
+    expect(existsSync(`${logFile}.1`)).toBe(false);
+    const current = readFileSync(logFile, "utf8").trim().split("\n");
+    expect(current).toHaveLength(2);
+    expect(current[0]).toBe("pre-existing line");
+    expect(current[1]).toMatch(/ sessionStart Error$/);
+  });
 });

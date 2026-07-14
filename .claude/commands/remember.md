@@ -7,21 +7,29 @@ argument-hint: [text to remember]
 The argument text below may contain quotes or shell metacharacters. Do not
 type it into a shell command. Instead:
 
-1. Use the Write tool to write the exact text of $ARGUMENTS, and nothing else
-   (no extra quoting, no added commentary), to the file
-   `/tmp/.mongo-claude-memory-remember-payload.txt`.
-
-2. Run this exact command using the Bash tool:
+1. Run this exact command using the Bash tool to create a fresh temp file,
+   and note the exact path it prints (it will differ on every run):
 
 ```
-node /Users/teja.boddapati/Desktop/mongo-claude-memory/dist/capture/remember.js --file /tmp/.mongo-claude-memory-remember-payload.txt
+mktemp -t mongo-claude-memory-remember
 ```
 
-3. Run this exact command using the Bash tool to remove the temp file:
+2. Use the Write tool to write the exact text of $ARGUMENTS, and nothing else
+   (no extra quoting, no added commentary), to the path printed in step 1.
+
+3. Run this exact command using the Bash tool, substituting the path from
+   step 1 in place of `<path>`:
 
 ```
-rm -f /tmp/.mongo-claude-memory-remember-payload.txt
+node /Users/teja.boddapati/Desktop/mongo-claude-memory/dist/capture/remember.js --file <path>
 ```
 
-Relay the command's output from step 2 concisely to the user: report success
+4. Run this exact command using the Bash tool to remove the temp file,
+   substituting the same path from step 1 in place of `<path>`:
+
+```
+rm -f <path>
+```
+
+Relay the command's output from step 3 concisely to the user: report success
 or the exact error message, do not add commentary or reformat it.

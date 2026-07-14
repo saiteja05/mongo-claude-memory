@@ -13,7 +13,9 @@ import type { RunConsolidationDeps } from "./run.js";
 import { reclaimStale, claimBatch } from "./claim.js";
 import { acquireLease, renewLease, releaseLease } from "./lock.js";
 import { extractFacts } from "./extractFacts.js";
+import { classifyInjection } from "./classifyInjection.js";
 import { upsertBelief } from "./upsertBelief.js";
+import { reconcileCandidate } from "./reconcileBelief.js";
 import { compileBrief } from "./compileBrief.js";
 import { runConsolidationDryRun, formatDryRunReport, defaultDryRunDeps } from "./dryRun.js";
 import { runRollback, formatRollbackReport } from "./rollback.js";
@@ -62,6 +64,7 @@ function buildDeps(config: Config, runId: string): RunConsolidationDeps {
     claimBatch,
     fetchExistingBeliefs,
     extractFacts,
+    classifyInjection,
     embed: (texts: string[]) => embed(texts, "document"),
     upsertBelief: (db, project, candidate, embedding, threshold, candidateEvidenceAt) =>
       upsertBelief(
@@ -74,7 +77,8 @@ function buildDeps(config: Config, runId: string): RunConsolidationDeps {
           mode: config.embeddingMode,
           model: config.voyageModel,
         },
-        candidateEvidenceAt
+        candidateEvidenceAt,
+        { threshold: config.reconcileSimilarityThreshold, reconcile: reconcileCandidate }
       ),
     compileBrief,
     markConsolidated,
@@ -197,7 +201,7 @@ export async function main(): Promise<void> {
       // a clean no-op rather than a crash (there is nothing this job can do).
       console.error(
         `[consolidate] configuration error, skipping run: ${
-          err instanceof Error ? err.message : "unknown error"
+          err instanceof Error ? err.name : "unknown error"
         }`
       );
       return;
@@ -307,7 +311,7 @@ export async function main(): Promise<void> {
     }
   } catch (err) {
     console.error(
-      `[consolidate] unexpected failure: ${err instanceof Error ? err.message : "unknown error"}`
+      `[consolidate] unexpected failure: ${err instanceof Error ? err.name : "unknown error"}`
     );
     process.exitCode = 1;
   } finally {

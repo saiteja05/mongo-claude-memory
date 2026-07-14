@@ -1,23 +1,42 @@
-import type { Db } from "mongodb";
-import { OBSERVATIONS } from "../db/schema.js";
-import type { Observation } from "../db/schema.js";
+import type { Db, Document } from "mongodb";
+import { LOCKS, OBSERVATIONS } from "../db/schema.js";
+import type { Lock, Observation } from "../db/schema.js";
 
 /**
  * Crash recovery sweep (DESIGN.md 7.2): resets observations stuck in
  * "claimed" (a prior run claimed them but crashed before marking them
  * consolidated) back to "pending" so a future run can pick them up. Returns
  * the number of observations reclaimed.
+ *
+ * Lease-aware: a run that is alive and correctly renewing its lease, but
+ * simply taking longer than reclaimAfterMs to process one batch, must not
+ * have its own in-flight claims yanked back to pending by a
+ * concurrently-starting run's reclaimStale call (that would leave the batch
+ * reprocessed forever, since the live run's later markConsolidated, filtered
+ * on its own run_id, would then match zero documents). So when the project's
+ * lease is currently held (heldUntil in the future) by a run other than the
+ * caller, that holder's run_id is excluded from the reset filter entirely.
  */
 export async function reclaimStale(
   db: Db,
   project: string,
-  reclaimAfterMs: number
+  reclaimAfterMs: number,
+  runId: string
 ): Promise<number> {
   const threshold = new Date(Date.now() - reclaimAfterMs);
-  const result = await db.collection<Observation>(OBSERVATIONS).updateMany(
-    { project, status: "claimed", claimed_at: { $lt: threshold } },
-    { $set: { status: "pending" }, $unset: { run_id: "", claimed_at: "" } }
-  );
+  const now = new Date();
+
+  const lock = await db.collection<Lock>(LOCKS).findOne({ _id: `consolidate:${project}` });
+  const liveHolder = lock && lock.heldUntil > now && lock.holder !== runId ? lock.holder : null;
+
+  const filter: Document = { project, status: "claimed", claimed_at: { $lt: threshold } };
+  if (liveHolder !== null) {
+    filter.run_id = { $ne: liveHolder };
+  }
+
+  const result = await db
+    .collection<Observation>(OBSERVATIONS)
+    .updateMany(filter, { $set: { status: "pending" }, $unset: { run_id: "", claimed_at: "" } });
   return result.modifiedCount;
 }
 
@@ -81,7 +100,10 @@ export async function claimBatch(
     .toArray();
 
   // The re-fetch has no ordering guarantee of its own; restore the
-  // created_at-ascending order established by the initial sorted find.
-  const order = new Map(ids.map((id, index) => [id, index]));
-  return claimed.sort((a, b) => (order.get(a._id) ?? 0) - (order.get(b._id) ?? 0));
+  // created_at-ascending order established by the initial sorted find. Keyed
+  // by String(id), not id itself: the BSON driver deserializes a distinct
+  // ObjectId instance per query for the same id value, so a reference-keyed
+  // Map would never match between this find() and the one above.
+  const order = new Map(ids.map((id, index) => [String(id), index]));
+  return claimed.sort((a, b) => (order.get(String(a._id)) ?? 0) - (order.get(String(b._id)) ?? 0));
 }

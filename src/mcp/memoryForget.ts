@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import type { Db, Document } from "mongodb";
 import { BELIEFS } from "../db/schema.js";
 import { compileBrief as defaultCompileBrief } from "../consolidation/compileBrief.js";
+import { deleteBriefCache } from "../briefs/briefCache.js";
 
 export interface MemoryForgetParams {
   project: string;
@@ -48,7 +49,10 @@ function toFilterId(id: string): ObjectId | string {
  * "core"), so a forgotten belief stops being injected at the very next
  * SessionStart instead of lingering until an unrelated consolidation run.
  * A recompile failure never fails the forget: it is logged to stderr and
- * reported as recompiled: false.
+ * reported as recompiled: false. The local last-known-good brief cache
+ * (briefCache.ts) for this project is also invalidated, best-effort, so a
+ * later Atlas outage cannot serve the now-stale cached copy; that invalidation
+ * has its own try/catch and never affects the reported result.
  */
 export async function runMemoryForget(
   db: Db,
@@ -71,6 +75,18 @@ export async function runMemoryForget(
   let recompiled = false;
 
   if (matched) {
+    // Best-effort: drop any locally cached brief for this project so a
+    // forget can never be served stale from disk once Atlas becomes
+    // unreachable. Its own try/catch, separate from the recompile below: a
+    // cache-delete failure must never fail the forget or count against
+    // recompiled (deleteBriefCache itself already swallows its own errors,
+    // this is just an extra guard against a future change to that contract).
+    try {
+      deleteBriefCache(params.project);
+    } catch {
+      // Never let cache invalidation affect the forget's outcome.
+    }
+
     try {
       await deps.compileBrief(db, params.project);
       if (existing?.scope === "core") {

@@ -28,6 +28,8 @@ export interface Observation {
   claimed_at?: Date; // for lease/claim reclaim on crash
   created_at: Date;
   expiresAt?: Date; // TTL target; unset for high-priority user captures
+  chunk_index?: number; // consecutive slices of one session transcript, 0-based index
+  chunk_count?: number; // total number of chunks in this session's capture
 }
 
 export type BeliefScope = "core" | "project" | "archive";

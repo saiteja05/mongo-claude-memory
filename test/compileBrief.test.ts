@@ -28,7 +28,11 @@ afterEach(() => {
 });
 
 function makeFakeDb(beliefs: Record<string, unknown>[], existingBrief: Record<string, unknown> | null = null) {
-  const beliefsCollection = { find: vi.fn(() => ({ toArray: async () => beliefs })) };
+  const toArray = vi.fn(async () => beliefs);
+  const limit = vi.fn(() => ({ toArray }));
+  const sort = vi.fn(() => ({ limit }));
+  const find = vi.fn(() => ({ sort }));
+  const beliefsCollection = { find, sort, limit, toArray };
   const findOne = vi.fn(async () => existingBrief);
   const replaceOne = vi.fn(async () => ({ acknowledged: true }));
   const briefsCollection = { findOne, replaceOne };
@@ -77,6 +81,16 @@ describe("compileBrief", () => {
     const replacement = replaceOne.mock.calls[0][1] as { content: string; belief_ids: string[] };
     expect(replacement.belief_ids).toEqual(["b-project-high", "b-project-low"]);
     expect(replacement.content.split("\n")[0]).toContain("Project high importance fact");
+  });
+
+  it("bounds the beliefs fetch with a server-side sort and limit instead of loading everything", async () => {
+    const { compileBrief } = await import("../src/consolidation/compileBrief.js");
+    const { db, beliefsCollection } = makeFakeDb([]);
+
+    await compileBrief(db as any, "proj");
+
+    expect(beliefsCollection.sort).toHaveBeenCalledWith({ importance: -1, last_evidence_at: -1 });
+    expect(beliefsCollection.limit).toHaveBeenCalledWith(1000);
   });
 
   it("does not include core-scope beliefs in a project brief even if the query returned one", async () => {

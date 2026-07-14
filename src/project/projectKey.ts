@@ -33,8 +33,6 @@ export function normalizeRemoteUrl(url: string): string {
   const slashIndex = normalized.indexOf("/");
   if (slashIndex > 0) {
     normalized = normalized.slice(0, slashIndex).toLowerCase() + normalized.slice(slashIndex);
-  } else {
-    normalized = normalized.toLowerCase();
   }
 
   return normalized;
@@ -45,7 +43,7 @@ function pathModeKey(resolvedCwd: string): string {
     const output = execFileSync(
       "git",
       ["rev-parse", "--git-common-dir"],
-      { cwd: resolvedCwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      { cwd: resolvedCwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
     ).trim();
 
     const absoluteGitDir = path.resolve(resolvedCwd, output);
@@ -65,7 +63,7 @@ function remoteModeKey(resolvedCwd: string): string | null {
     const url = execFileSync(
       "git",
       ["config", "--get", "remote.origin.url"],
-      { cwd: resolvedCwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      { cwd: resolvedCwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
     ).trim();
     if (!url) return null;
 

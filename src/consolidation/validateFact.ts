@@ -1,3 +1,5 @@
+import { normalizeForMatching } from "./textNormalize.js";
+
 const MAX_TEXT_LENGTH = 500;
 const CODE_FENCE = "```";
 
@@ -43,24 +45,20 @@ const DENY_LIST: RegExp[] = [
 const VALID_SCOPES = new Set(["core", "project", "archive"]);
 const VALID_TYPES = new Set(["preference", "convention", "lesson", "reference"]);
 
-// Zero-width/invisible unicode characters that can be inserted inside a word
-// to defeat literal-phrase regex matching without changing how the text
-// looks or reads to a human or an LLM: zero-width space, zero-width
-// non-joiner, zero-width joiner, BOM/zero-width no-break space, and soft
-// hyphen.
-const INVISIBLE_CHARS = /[\u200B\u200C\u200D\uFEFF\u00AD]/g;
-
 /**
  * Normalizes text for deny-list matching only (never used for the length or
- * code-fence checks, which must keep seeing the original text): strips
- * invisible unicode characters that could be hidden inside a word, then
- * collapses any run of whitespace, including newlines, into a single space.
- * This closes the gap where a phrase split across extra spaces or newlines,
- * or a word with a zero-width character inserted in the middle, would
- * otherwise slip past a regex written for single-spaced literal phrasing.
+ * code-fence checks, which must keep seeing the original text): delegates to
+ * normalizeForMatching (textNormalize.ts), which folds Cyrillic/Greek
+ * homoglyphs to their Latin lookalikes, applies Unicode NFKC normalization,
+ * strips invisible unicode characters that could be hidden inside a word,
+ * and collapses any run of whitespace, including newlines, into a single
+ * space. This closes the gap where a phrase disguised with lookalike
+ * characters, split across extra spaces or newlines, or hiding a zero-width
+ * character mid-word, would otherwise slip past a regex written for
+ * single-spaced Latin-only phrasing.
  */
 function normalizeForDenyList(text: string): string {
-  return text.replace(INVISIBLE_CHARS, "").replace(/\s+/g, " ");
+  return normalizeForMatching(text);
 }
 
 /**
