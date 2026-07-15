@@ -6,6 +6,7 @@ type Props = {
 };
 
 export default function BoomerangVideoBg({ src, className }: Props) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const displayCanvasRef = useRef<HTMLCanvasElement>(null);
   const [framesReady, setFramesReady] = useState(false);
@@ -103,11 +104,26 @@ export default function BoomerangVideoBg({ src, className }: Props) {
     canvas.width = first.width;
     canvas.height = first.height;
 
+    // Paint the first frame immediately so the canvas is never blank while the
+    // IntersectionObserver settles (or under reduced motion, where it stays put).
+    ctx.drawImage(first, 0, 0);
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Reduced motion: leave the single still frame (same nature bridge), no loop.
+    if (prefersReducedMotion) {
+      return;
+    }
+
     let index = 0;
     let direction = 1;
     let last = performance.now();
     const interval = 1000 / 30;
     let rafId = 0;
+    let running = false;
 
     const render = (now: number) => {
       if (now - last >= interval) {
@@ -124,12 +140,48 @@ export default function BoomerangVideoBg({ src, className }: Props) {
       }
       rafId = requestAnimationFrame(render);
     };
-    rafId = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(rafId);
+
+    // start/stop preserve index and direction (they live in this effect scope),
+    // so resuming after the hero scrolls back in continues smoothly.
+    const start = () => {
+      if (running) return;
+      running = true;
+      last = performance.now();
+      rafId = requestAnimationFrame(render);
+    };
+
+    const stop = () => {
+      if (!running) return;
+      running = false;
+      cancelAnimationFrame(rafId);
+    };
+
+    const wrapper = wrapperRef.current;
+    let observer: IntersectionObserver | null = null;
+
+    if (wrapper && typeof IntersectionObserver === 'function') {
+      observer = new IntersectionObserver((entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting) {
+          start();
+        } else {
+          stop();
+        }
+      });
+      observer.observe(wrapper);
+    } else {
+      // No IntersectionObserver available: fall back to always running.
+      start();
+    }
+
+    return () => {
+      stop();
+      if (observer) observer.disconnect();
+    };
   }, [framesReady]);
 
   return (
-    <div className={className ?? 'absolute inset-0 w-full h-full'}>
+    <div ref={wrapperRef} className={className ?? 'absolute inset-0 w-full h-full'}>
       <video
         ref={videoRef}
         src={src}

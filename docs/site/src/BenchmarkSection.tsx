@@ -1,4 +1,6 @@
 import { FlaskConical, Split, Gavel, BarChart3, ExternalLink } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Reveal, CountUp } from './motion';
 
 type BenchmarkLink = {
   icon: typeof FlaskConical;
@@ -19,7 +21,7 @@ const BENCHMARK_LINKS: BenchmarkLink[] = [
     icon: Split,
     title: 'The four arms',
     description:
-      "No memory at all (the guessability floor), Claude Code's own CLAUDE.md and auto-memory, this engine alone, and both running together, the realistic day to day setup for most users.",
+      "No memory at all (the guessability floor), Claude Code's own CLAUDE.md and auto-memory, this engine alone, and both running together, the realistic day-to-day setup for most users.",
     href: 'https://github.com/saiteja05/mongo-claude-memory#the-four-arms',
   },
   {
@@ -47,12 +49,14 @@ type Stat = {
 const RECALL_STATS: Stat[] = [
   { value: '8%', label: 'No memory' },
   { value: '58%', label: "Claude's own memory" },
-  { value: '75%', label: 'This engine', accent: true },
+  { value: '75%', label: 'This engine alone' },
+  { value: '100%', label: 'Engine + Claude memory together', accent: true },
 ];
 
 const CAPTURE_STATS: Stat[] = [
   { value: '58%', label: "Claude's own memory" },
-  { value: '92%', label: 'This engine', accent: true },
+  { value: '92%', label: 'This engine' },
+  { value: '100%', label: 'Engine + Claude together', accent: true },
 ];
 
 const HEADING_FONT =
@@ -60,42 +64,46 @@ const HEADING_FONT =
 
 function BenchmarkLinkCard({ icon: Icon, title, description, href }: BenchmarkLink) {
   return (
-    <a
+    <motion.a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="group flex flex-col gap-2 rounded-2xl border border-white/60 bg-white/80 backdrop-blur-md shadow-sm px-5 py-5 hover:bg-white/95 transition-colors"
+      whileHover={{ y: -3 }}
+      transition={{ duration: 0.2, ease: 'easeOut' }}
+      className="group flex flex-col gap-2 rounded-2xl border border-[#336443]/12 bg-white/80 backdrop-blur-md shadow-sm hover:shadow-md px-5 py-5 hover:bg-white/95 transition-[background-color,box-shadow] duration-200 ease-out"
     >
       <div className="flex items-center gap-2">
         <Icon className="w-4 h-4 text-[#00684A] shrink-0" />
         <span className="text-sm sm:text-base font-semibold text-[#1f2a1d]">{title}</span>
       </div>
-      <p className="text-xs sm:text-sm text-[#4b5b47]/80 leading-snug">{description}</p>
+      <p className="text-xs sm:text-sm text-[#4b5b47]/85 leading-snug">{description}</p>
       <span className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-[#336443] group-hover:text-[#1f2a1d] transition-colors">
         View on GitHub
-        <ExternalLink className="w-3 h-3" />
+        <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
       </span>
-    </a>
+    </motion.a>
   );
 }
 
 function StatChip({ value, label, accent }: Stat) {
+  const numericValue = Number(value.replace('%', ''));
   return (
     <div
       className={
         accent
           ? 'flex flex-col items-center gap-1 rounded-2xl border-2 bg-white/90 px-3 py-4 sm:py-5'
-          : 'flex flex-col items-center gap-1 rounded-2xl border border-white/60 bg-white/70 px-3 py-4 sm:py-5'
+          : 'flex flex-col items-center gap-1 rounded-2xl border border-[#336443]/12 bg-white/70 px-3 py-4 sm:py-5'
       }
       style={accent ? { borderColor: '#00684A', boxShadow: '0 0 0 1px #00684A22' } : undefined}
     >
-      <span
+      <CountUp
+        value={numericValue}
+        suffix="%"
+        durationMs={accent ? 1400 : 1200}
         className={accent ? 'text-3xl sm:text-4xl font-normal text-[#00684A]' : 'text-3xl sm:text-4xl font-normal text-[#4b5b47]'}
         style={{ fontFamily: HEADING_FONT }}
-      >
-        {value}
-      </span>
-      <span className="text-xs sm:text-sm font-medium text-[#4b5b47]/80 text-center">{label}</span>
+      />
+      <span className="text-xs sm:text-sm font-medium text-[#4b5b47] text-center">{label}</span>
     </div>
   );
 }
@@ -104,53 +112,65 @@ function BenchmarkSection() {
   return (
     <section id="benchmark" className="relative w-full bg-[#f7f5ef] py-16 sm:py-20 md:py-28 px-4 sm:px-6 overflow-hidden">
       <div className="max-w-5xl mx-auto text-center mb-12 sm:mb-16">
-        <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
-          Independently measured
-        </span>
-        <h2
-          className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
-          style={{ fontFamily: HEADING_FONT, letterSpacing: '-0.03em' }}
-        >
-          Benchmarked, not just claimed.
-        </h2>
-        <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-2xl mx-auto leading-relaxed">
-          The recall improvement described on this page is measured, not asserted. A four-arm benchmark runs the same
-          set of scenarios against this engine, against Claude Code's native memory, and against no memory at all, each
-          isolated in its own arm. Every answer is graded by keyword matching first, then cross-checked by a blinded
-          LLM judge that never learns which arm produced it, keeping the grading independent of the system being
-          tested.
-        </p>
+        <Reveal delay={0}>
+          <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
+            Independently graded
+          </span>
+        </Reveal>
+        <Reveal delay={0.07}>
+          <h2
+            className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
+            style={{ fontFamily: HEADING_FONT, letterSpacing: '-0.03em' }}
+          >
+            Benchmarked, not just claimed.
+          </h2>
+        </Reveal>
+        <Reveal delay={0.14}>
+          <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-2xl mx-auto leading-relaxed">
+            The recall improvement described on this page is measured, not asserted. A four-arm benchmark runs the
+            same set of scenarios against this engine, against Claude Code's native memory, against both running
+            together, and against no memory at all, each isolated in its own arm. Every answer is graded by keyword
+            matching first, then cross-checked by a blinded LLM judge that never learns which arm produced it,
+            keeping the grading independent of the system being tested.
+          </p>
+        </Reveal>
       </div>
 
       <div className="max-w-3xl mx-auto mb-10 sm:mb-12">
-        <div className="grid grid-cols-3 gap-3 sm:gap-4">
-          {RECALL_STATS.map((stat) => (
-            <StatChip key={stat.label} {...stat} />
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+          {RECALL_STATS.map((stat, i) => (
+            <Reveal key={stat.label} delay={i * 0.07}>
+              <StatChip {...stat} />
+            </Reveal>
           ))}
         </div>
-        <p className="mt-4 sm:mt-5 text-center text-xs sm:text-sm text-[#4b5b47]/80 leading-relaxed">
+        <p className="mt-4 sm:mt-5 text-center text-xs sm:text-sm text-[#4b5b47] leading-relaxed">
           Recall: asked again later, in a fresh session with no shared history, how often Claude answered correctly.
         </p>
 
         <div className="mt-8 pt-6 border-t border-[#4b5b47]/15">
-          <div className="flex items-center justify-center gap-3 sm:gap-4">
-            {CAPTURE_STATS.map((stat) => (
-              <StatChip key={stat.label} {...stat} />
+          <div className="grid grid-cols-3 gap-3 sm:gap-4">
+            {CAPTURE_STATS.map((stat, i) => (
+              <Reveal key={stat.label} delay={i * 0.07}>
+                <StatChip {...stat} />
+              </Reveal>
             ))}
           </div>
-          <p className="mt-3 text-center text-xs sm:text-sm text-[#4b5b47]/70">
+          <p className="mt-3 text-center text-xs sm:text-sm text-[#4b5b47]">
             Capture: whether the fact got saved anywhere at all, before recall is even tested. This engine leads on both.
           </p>
         </div>
       </div>
 
       <div className="max-w-5xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {BENCHMARK_LINKS.map((link) => (
-          <BenchmarkLinkCard key={link.href} {...link} />
+        {BENCHMARK_LINKS.map((link, i) => (
+          <Reveal key={link.href} delay={i * 0.07}>
+            <BenchmarkLinkCard {...link} />
+          </Reveal>
         ))}
       </div>
 
-      <p className="max-w-2xl mx-auto mt-8 sm:mt-10 text-center text-xs sm:text-sm text-[#4b5b47]/70 leading-relaxed">
+      <p className="max-w-2xl mx-auto mt-8 sm:mt-10 text-center text-xs sm:text-sm text-[#4b5b47] leading-relaxed">
         The latest run completed on 2026-07-14 and cleared blinded judge review. Results are published in the
         README's Latest results section linked above, so the numbers you find there are always from the most recent
         run that cleared that bar.

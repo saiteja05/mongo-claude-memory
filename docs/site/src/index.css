@@ -9,6 +9,8 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
-html {
-  scroll-behavior: smooth;
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }

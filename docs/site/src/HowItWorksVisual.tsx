@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { motion, useReducedMotion, AnimatePresence } from 'framer-motion';
+import { motion, useInView, useReducedMotion, AnimatePresence } from 'framer-motion';
 import {
   LogOut,
   MessageSquarePlus,
@@ -12,6 +12,7 @@ import {
   Sparkles,
   Zap,
 } from 'lucide-react';
+import { Reveal } from './motion';
 
 type Source = {
   icon: typeof LogOut;
@@ -21,16 +22,16 @@ type Source = {
 };
 
 const SOURCES: Source[] = [
-  { icon: LogOut, label: 'SessionEnd hook', x: 4, y: 22 },
-  { icon: MessageSquarePlus, label: '/remember', x: 13, y: 3 },
-  { icon: Hash, label: 'Hash line (#)', x: 25, y: 3 },
-  { icon: Plug, label: 'memory_write (MCP)', x: 33, y: 22 },
+  { icon: LogOut, label: 'SessionEnd hook', x: 10, y: 22 },
+  { icon: MessageSquarePlus, label: '/remember', x: 19, y: 3 },
+  { icon: Hash, label: 'Hash line (#)', x: 31, y: 3 },
+  { icon: Plug, label: 'memory_write (MCP)', x: 39, y: 22 },
 ];
 
-const CAPTURE = { x: 15, y: 58 };
-const CONSOLIDATE = { x: 42, y: 58 };
-const RECALL = { x: 69, y: 58 };
-const MCP = { x: 85, y: 90 };
+const CAPTURE = { x: 21, y: 58 };
+const CONSOLIDATE = { x: 50, y: 58 };
+const RECALL = { x: 78, y: 58 };
+const MCP = { x: 88, y: 90 };
 
 type DbOpKind = 'write' | 'read' | 'compact';
 
@@ -120,6 +121,11 @@ const MCP_BRANCH: BranchContent = {
 };
 
 const STAGE_INTERVAL_MS = 3200;
+const CONSOLIDATE_INTERVAL_MS = 4500;
+
+function stageDurationMs(index: number) {
+  return STAGES[index].label === 'Consolidate' ? CONSOLIDATE_INTERVAL_MS : STAGE_INTERVAL_MS;
+}
 
 function bend(x1: number, y1: number, x2: number, y2: number, lift: number) {
   const mx = (x1 + x2) / 2;
@@ -162,6 +168,7 @@ function NodeCard({
 
   return (
     <motion.div
+      layout
       onClick={onClick}
       onKeyDown={interactive ? handleKeyDown : undefined}
       role={interactive ? 'button' : undefined}
@@ -175,7 +182,7 @@ function NodeCard({
             }
           : {
               scale: active ? 1.05 : 1,
-              opacity: active === false ? 0.55 : 1,
+              opacity: active === false ? 0.78 : 1,
               boxShadow: active ? `0 0 0 2px ${accent}, 0 0 20px 4px ${accent}66` : `0 0 0 1px ${accent}22`,
             }
       }
@@ -209,27 +216,47 @@ function NodeCard({
       >
         {caption}
       </span>
-      {dbOps && dbOps.length > 0 && (
-        <div className="mt-2 pt-2 border-t border-[#4b5b47]/15 flex flex-col items-center gap-1">
-          {dbOps.map(({ op, kind }) => (
-            <span key={op} className="inline-flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: KIND_COLOR[kind] }} />
-              <code className="font-mono text-[10px] leading-tight text-[#2d3a2a] whitespace-nowrap">{op}</code>
-            </span>
-          ))}
-        </div>
-      )}
-      {external && external.length > 0 && (
-        <div className="mt-2 pt-2 border-t border-dashed border-[#4b5b47]/30 flex flex-col items-center gap-1">
-          <span className="text-[9px] font-semibold uppercase tracking-wide text-[#4b5b47]/70">Talks to:</span>
-          {external.map(({ icon: Icon, label: extLabel }) => (
-            <span key={extLabel} className="inline-flex items-center gap-1 text-[9px] font-medium text-[#4b5b47]/80">
-              <Icon className="w-2.5 h-2.5 shrink-0" />
-              <span className="whitespace-nowrap">{extLabel}</span>
-            </span>
-          ))}
-        </div>
-      )}
+      <AnimatePresence initial={false}>
+        {dbOps && dbOps.length > 0 && (
+          <motion.div
+            key="dbops"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: 'easeOut' }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 pt-2 border-t border-[#4b5b47]/15 flex flex-col items-center gap-1">
+              {dbOps.map(({ op, kind }) => (
+                <span key={op} className="inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: KIND_COLOR[kind] }} />
+                  <code className="font-mono text-[10px] leading-tight text-[#2d3a2a] whitespace-nowrap">{op}</code>
+                </span>
+              ))}
+            </div>
+          </motion.div>
+        )}
+        {external && external.length > 0 && (
+          <motion.div
+            key="external"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: 'easeOut' }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 pt-2 border-t border-dashed border-[#4b5b47]/30 flex flex-col items-center gap-1">
+              <span className="text-[9px] font-semibold uppercase tracking-wide text-[#4b5b47]">Talks to:</span>
+              {external.map(({ icon: Icon, label: extLabel }) => (
+                <span key={extLabel} className="inline-flex items-center gap-1 text-[9px] font-medium text-[#4b5b47]">
+                  <Icon className="w-2.5 h-2.5 shrink-0" />
+                  <span className="whitespace-nowrap">{extLabel}</span>
+                </span>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -321,7 +348,7 @@ function DesktopDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: 
               d={path.d}
               fill="none"
               stroke="#4b5b47"
-              strokeOpacity={sourcesActive ? 0.35 : 0.15}
+              strokeOpacity={sourcesActive ? 0.35 : 0.22}
               strokeWidth="1.5"
               vectorEffect="non-scaling-stroke"
             />
@@ -331,7 +358,7 @@ function DesktopDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: 
           d={capToCons.d}
           fill="none"
           stroke="#4b5b47"
-          strokeOpacity={capToConsActive ? 0.45 : 0.18}
+          strokeOpacity={capToConsActive ? 0.45 : 0.22}
           strokeWidth="1.5"
           vectorEffect="non-scaling-stroke"
         />
@@ -339,7 +366,7 @@ function DesktopDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: 
           d={consToRecall.d}
           fill="none"
           stroke="#4b5b47"
-          strokeOpacity={consToRecallActive ? 0.45 : 0.18}
+          strokeOpacity={consToRecallActive ? 0.45 : 0.22}
           strokeWidth="1.5"
           vectorEffect="non-scaling-stroke"
         />
@@ -347,7 +374,7 @@ function DesktopDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: 
           d={recallToMcp.d}
           fill="none"
           stroke="#4b5b47"
-          strokeOpacity="0.18"
+          strokeOpacity="0.22"
           strokeWidth="1.5"
           strokeDasharray="4 3"
           vectorEffect="non-scaling-stroke"
@@ -476,7 +503,7 @@ function DesktopDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: 
 function MobileDiagram({ activeIndex, onJump }: { activeIndex: number; onJump: (i: number) => void }) {
   return (
     <div className="flex flex-col items-stretch gap-3 max-w-sm mx-auto">
-      <div className="flex flex-wrap items-center justify-center gap-2 mb-1" aria-hidden="true">
+      <div className="flex flex-wrap items-center justify-center gap-2 mb-1">
         {SOURCES.map((s) => (
           <SourceBadge key={s.label} icon={s.icon} label={s.label} />
         ))}
@@ -536,14 +563,18 @@ function HowItWorksVisual() {
   const prefersReducedMotion = useReducedMotion();
   const [activeIndex, setActiveIndex] = useState(0);
   const [resetKey, setResetKey] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
+  const inView = useInView(sectionRef, { amount: 0.3 });
 
   useEffect(() => {
     if (prefersReducedMotion) return;
-    const id = setInterval(() => {
+    if (paused || !inView) return;
+    const id = setTimeout(() => {
       setActiveIndex((i) => (i + 1) % STAGES.length);
-    }, STAGE_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [resetKey, prefersReducedMotion]);
+    }, stageDurationMs(activeIndex));
+    return () => clearTimeout(id);
+  }, [activeIndex, resetKey, paused, inView, prefersReducedMotion]);
 
   function jumpToStage(i: number) {
     setActiveIndex(i);
@@ -553,38 +584,58 @@ function HowItWorksVisual() {
   const activeKinds = Array.from(new Set(STAGES[activeIndex].dbOps.map((op) => op.kind)));
 
   return (
-    <section id="pipeline" className="relative w-full bg-[#f7f5ef] py-16 sm:py-20 md:py-28 px-4 sm:px-6 overflow-hidden">
+    <section
+      ref={sectionRef}
+      id="pipeline"
+      className="relative w-full bg-[#eef0e8] py-16 sm:py-20 md:py-28 px-4 sm:px-6 overflow-hidden"
+    >
       <div className="max-w-5xl mx-auto text-center mb-12 sm:mb-16">
-        <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
-          Capture, Consolidate, Retrieve
-        </span>
-        <h2
-          className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
-          style={{
-            fontFamily:
-              '"Neue Haas Grotesk Display Pro 55 Roman", "Neue Haas Grotesk Text Pro", "Helvetica Neue", Helvetica, Arial, sans-serif',
-            letterSpacing: '-0.03em',
-          }}
-        >
-          Ground agents with MongoDB.
-        </h2>
-        <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
-          Four independent writers feed one offline consolidator. Every session starts from a small, ranked brief.
-        </p>
+        <Reveal className="mb-2 sm:mb-3">
+          <span className="inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
+            Capture, Consolidate, Retrieve
+          </span>
+        </Reveal>
+        <Reveal delay={0.07}>
+          <h2
+            className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
+            style={{
+              fontFamily:
+                '"Neue Haas Grotesk Display Pro 55 Roman", "Neue Haas Grotesk Text Pro", "Helvetica Neue", Helvetica, Arial, sans-serif',
+              letterSpacing: '-0.03em',
+            }}
+          >
+            Ground agents with MongoDB.
+          </h2>
+        </Reveal>
+        <Reveal delay={0.14} className="mt-3 sm:mt-4">
+          <p className="text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
+            Four independent writers feed one offline consolidator. Every session starts from a small, ranked brief.
+          </p>
+        </Reveal>
       </div>
 
       {prefersReducedMotion ? (
         <StaticFallback />
       ) : (
         <>
-          <div className="hidden lg:block">
-            <DesktopDiagram activeIndex={activeIndex} onJump={jumpToStage} />
-          </div>
-          <div className="lg:hidden">
-            <MobileDiagram activeIndex={activeIndex} onJump={jumpToStage} />
+          <div
+            onMouseEnter={() => setPaused(true)}
+            onMouseLeave={() => setPaused(false)}
+            onFocus={() => setPaused(true)}
+            onBlur={() => setPaused(false)}
+          >
+            <div className="hidden xl:block">
+              <DesktopDiagram activeIndex={activeIndex} onJump={jumpToStage} />
+            </div>
+            <div className="xl:hidden">
+              <MobileDiagram activeIndex={activeIndex} onJump={jumpToStage} />
+            </div>
           </div>
 
-          <div className="max-w-xl mx-auto text-center mt-8 sm:mt-10 min-h-[3.5rem] sm:min-h-[3rem] px-2">
+          <div
+            className="max-w-xl mx-auto text-center mt-8 sm:mt-10 min-h-[3.5rem] sm:min-h-[3rem] px-2"
+            aria-live="polite"
+          >
             <AnimatePresence mode="wait">
               <motion.p
                 key={activeIndex}
@@ -599,7 +650,7 @@ function HowItWorksVisual() {
             </AnimatePresence>
           </div>
 
-          <div className="flex items-center justify-center gap-3 mt-3 text-[10px] sm:text-xs font-medium text-[#4b5b47]/60">
+          <div className="flex items-center justify-center gap-3 mt-3 text-[10px] sm:text-xs font-medium text-[#4b5b47]">
             <AnimatePresence mode="wait">
               <motion.div
                 key={activeIndex}
@@ -619,14 +670,22 @@ function HowItWorksVisual() {
             </AnimatePresence>
           </div>
 
-          <div className="flex items-center justify-center gap-2 mt-6 sm:mt-8">
+          <div className="flex items-center justify-center gap-0.5 mt-6 sm:mt-8">
             {STAGES.map((stage, i) => (
-              <span
+              <button
                 key={stage.label}
-                className={`h-1.5 rounded-full transition-all duration-500 ${
-                  i === activeIndex ? 'w-6 bg-[#336443]' : 'w-1.5 bg-[#336443]/20'
-                }`}
-              />
+                type="button"
+                onClick={() => jumpToStage(i)}
+                className="p-2"
+                aria-label={`Go to stage ${i + 1} of ${STAGES.length}`}
+                aria-current={i === activeIndex ? 'true' : undefined}
+              >
+                <span
+                  className={`block h-1.5 rounded-full transition-all duration-500 ${
+                    i === activeIndex ? 'w-6 bg-[#336443]' : 'w-1.5 bg-[#336443]/20'
+                  }`}
+                />
+              </button>
             ))}
           </div>
         </>

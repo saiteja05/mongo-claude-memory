@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useInView, useReducedMotion } from 'framer-motion';
 import { Terminal, Database, ArrowRight, ArrowDown, MousePointerClick, RefreshCw, ExternalLink } from 'lucide-react';
+import { Reveal } from './motion';
 
 type Step = {
   label: string;
@@ -84,7 +86,8 @@ const STEPS: Step[] = [
     consoleText: '(nothing typed, session just ended)',
     isPlaceholder: true,
     toolName: 'SessionEnd hook',
-    toolDescription: 'Fires automatically when the session ends, captures the last 50,000 characters of the transcript.',
+    toolDescription:
+      "Fires automatically when the session ends, captures up to 500,000 characters of the transcript in 50,000-character chunks, keeping the session's start and its most recent activity.",
     whyItMatters: 'Nothing gets lost just because you forgot to flag it: the whole session is captured as a safety net.',
     collection: 'claude_memory.observations',
     operation: 'insertOne',
@@ -140,7 +143,8 @@ const STEPS: Step[] = [
   },
 ];
 
-const STEP_INTERVAL_MS = 4000;
+const STEP_INTERVAL_MS = 7000;
+const STEP_DWELL_MS = 14000;
 
 function ModeBadge({ mode }: { mode: Step['mode'] }) {
   const isManual = mode === 'manual';
@@ -157,25 +161,53 @@ function ModeBadge({ mode }: { mode: Step['mode'] }) {
 }
 
 function LiveDemoSection() {
+  const prefersReducedMotion = useReducedMotion();
   const [currentStep, setCurrentStep] = useState(0);
-  const [resetKey, setResetKey] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [dwelling, setDwelling] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
+  const inView = useInView(sectionRef, { amount: 0.3 });
+  const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    if (prefersReducedMotion || paused || dwelling || !inView) {
+      return;
+    }
     const id = setInterval(() => {
       setCurrentStep((s) => (s + 1) % STEPS.length);
     }, STEP_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [resetKey]);
+  }, [prefersReducedMotion, paused, dwelling, inView]);
+
+  useEffect(() => {
+    return () => {
+      if (dwellRef.current) {
+        clearTimeout(dwellRef.current);
+      }
+    };
+  }, []);
 
   function jumpToStep(i: number) {
     setCurrentStep(i);
-    setResetKey((k) => k + 1);
+    if (dwellRef.current) {
+      clearTimeout(dwellRef.current);
+    }
+    setDwelling(true);
+    dwellRef.current = setTimeout(() => {
+      setDwelling(false);
+      dwellRef.current = null;
+    }, STEP_DWELL_MS);
   }
 
   const active = STEPS[currentStep];
+  const fade = prefersReducedMotion ? '' : 'recall-fade';
 
   return (
-    <section id="how-it-works" className="relative w-full bg-[#f7f5ef] py-16 sm:py-20 md:py-28 px-4 sm:px-6">
+    <section
+      ref={sectionRef}
+      id="how-it-works"
+      className="relative w-full bg-[#eef0e8] py-16 sm:py-20 md:py-28 px-4 sm:px-6"
+    >
       <style>{`
         @keyframes recallBlink {
           0%, 45% { opacity: 1; }
@@ -191,31 +223,39 @@ function LiveDemoSection() {
       `}</style>
 
       <div className="max-w-5xl mx-auto text-center mb-10 sm:mb-14">
-        <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
-          How to use it
-        </span>
-        <h2
-          className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
-          style={{
-            fontFamily:
-              '"Neue Haas Grotesk Display Pro 55 Roman", "Neue Haas Grotesk Text Pro", "Helvetica Neue", Helvetica, Arial, sans-serif',
-            letterSpacing: '-0.03em',
-          }}
-        >
-          Pull detail beyond the context window, one Atlas pipeline at a time.
-        </h2>
-        <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
-          Every hook, cron run, and tool call on the left maps to a real write or query on the right: no invented steps.
-        </p>
-        <a
-          href="https://github.com/saiteja05/mongo-claude-memory#using-it"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-4 sm:mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-[#336443] hover:text-[#1f2a1d] transition-colors"
-        >
-          More info
-          <ExternalLink className="w-3.5 h-3.5" />
-        </a>
+        <Reveal>
+          <span className="mb-2 sm:mb-3 inline-block text-[#4b5b47] text-xs sm:text-sm font-semibold uppercase tracking-[0.2em]">
+            How to use it
+          </span>
+        </Reveal>
+        <Reveal delay={0.07}>
+          <h2
+            className="font-normal leading-[1.05] text-[#336443] text-2xl sm:text-3xl md:text-4xl max-w-3xl mx-auto"
+            style={{
+              fontFamily:
+                '"Neue Haas Grotesk Display Pro 55 Roman", "Neue Haas Grotesk Text Pro", "Helvetica Neue", Helvetica, Arial, sans-serif',
+              letterSpacing: '-0.03em',
+            }}
+          >
+            Pull detail beyond the context window, one Atlas pipeline at a time.
+          </h2>
+        </Reveal>
+        <Reveal delay={0.14}>
+          <p className="mt-3 sm:mt-4 text-[#4b5b47] text-sm sm:text-base max-w-xl mx-auto">
+            Every hook, cron run, and tool call on the left maps to a real write or query on the right: no invented steps.
+          </p>
+        </Reveal>
+        <Reveal delay={0.21}>
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#using-it"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-4 sm:mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-[#336443] hover:text-[#1f2a1d] transition-colors"
+          >
+            More info
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        </Reveal>
       </div>
 
       <div className="max-w-5xl mx-auto mb-8 sm:mb-10 flex flex-col gap-4">
@@ -232,7 +272,7 @@ function LiveDemoSection() {
                     type="button"
                     aria-pressed={i === currentStep}
                     onClick={() => jumpToStep(i)}
-                    className={`text-xs sm:text-sm px-3 py-1.5 rounded-full border transition-colors ${
+                    className={`text-xs sm:text-sm px-3 py-2.5 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-full border transition-colors ${
                       i === currentStep
                         ? mode === 'manual'
                           ? 'bg-[#85AB8B] border-[#85AB8B] text-[#1f2a1d] font-semibold'
@@ -249,8 +289,17 @@ function LiveDemoSection() {
         ))}
       </div>
 
-      <div className="max-w-5xl mx-auto flex flex-col lg:flex-row items-stretch lg:items-center gap-4">
-        <div className="flex-1 min-w-0 rounded-xl overflow-hidden shadow-lg bg-[#1f2a1d] flex flex-col">
+      <div
+        role="group"
+        aria-roledescription="carousel"
+        aria-label="Usage steps"
+        onMouseEnter={() => setPaused(true)}
+        onMouseLeave={() => setPaused(false)}
+        onFocus={() => setPaused(true)}
+        onBlur={() => setPaused(false)}
+        className="max-w-5xl mx-auto flex flex-col lg:flex-row items-stretch lg:items-center gap-4"
+      >
+        <div className="flex-1 min-w-0 rounded-2xl overflow-hidden shadow-lg bg-[#1f2a1d] flex flex-col lg:h-[440px]">
           <div className="flex items-center gap-2 px-4 py-3 bg-[#171f15] border-b border-white/10">
             <span className="w-2.5 h-2.5 rounded-full bg-[#ff5f56]" />
             <span className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
@@ -261,7 +310,7 @@ function LiveDemoSection() {
             </span>
           </div>
           <div className="flex-1 px-4 sm:px-5 py-5 sm:py-6 font-mono min-h-[280px] sm:min-h-[320px] flex flex-col justify-center">
-            <div key={active.label} className="recall-fade flex flex-col gap-3 sm:gap-4">
+            <div key={active.label} className={`${fade} flex flex-col gap-3 sm:gap-4`}>
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] sm:text-xs uppercase tracking-wider text-[#85AB8B]">{active.label}</span>
                 <ModeBadge mode={active.mode} />
@@ -273,7 +322,9 @@ function LiveDemoSection() {
                   <>
                     <span className="text-[#85AB8B] mr-2">$</span>
                     <span className="text-white">{active.consoleText}</span>
-                    <span className="recall-cursor inline-block w-[7px] h-[1em] align-text-bottom ml-1 bg-[#85AB8B]" />
+                    <span
+                      className={`${prefersReducedMotion ? '' : 'recall-cursor'} inline-block w-[7px] h-[1em] align-text-bottom ml-1 bg-[#85AB8B]`}
+                    />
                   </>
                 )}
               </div>
@@ -286,14 +337,18 @@ function LiveDemoSection() {
           <ArrowDown className="lg:hidden w-5 h-5 text-[#336443]/40" />
         </div>
 
-        <div className="w-full lg:w-60 shrink-0 rounded-xl bg-white border border-[#336443]/15 shadow-sm px-4 sm:px-5 py-5 sm:py-6 flex flex-col gap-2">
-          <span className="text-[10px] sm:text-xs uppercase tracking-wider text-[#336443]/60 font-semibold">
+        <div
+          aria-live="polite"
+          aria-atomic="true"
+          className="w-full lg:w-60 shrink-0 rounded-2xl bg-white border border-[#336443]/15 shadow-sm px-4 sm:px-5 py-5 sm:py-6 flex flex-col gap-2 lg:max-h-[440px] overflow-y-auto"
+        >
+          <span className="text-[10px] sm:text-xs uppercase tracking-wider text-[#4b5b47] font-semibold">
             Tool call
           </span>
-          <div key={active.toolName} className="recall-fade flex flex-col gap-1.5">
+          <div key={active.toolName} className={`${fade} flex flex-col gap-1.5`}>
             <span className="text-sm sm:text-base font-semibold text-[#1f2a1d]">{active.toolName}</span>
             <span className="text-xs sm:text-sm text-[#4b5b47] leading-relaxed">{active.toolDescription}</span>
-            <span className="text-xs sm:text-sm text-[#336443]/80 italic leading-relaxed">
+            <span className="text-xs sm:text-sm text-[#4b5b47] italic leading-relaxed">
               Why it matters: {active.whyItMatters}
             </span>
           </div>
@@ -304,7 +359,7 @@ function LiveDemoSection() {
           <ArrowDown className="lg:hidden w-5 h-5 text-[#336443]/40" />
         </div>
 
-        <div className="flex-1 min-w-0 rounded-xl overflow-hidden shadow-lg bg-white flex flex-col">
+        <div className="flex-1 min-w-0 rounded-2xl overflow-hidden shadow-lg bg-white flex flex-col lg:h-[440px]">
           <div className="flex items-center justify-between gap-2 px-4 py-3 bg-[#00684A]">
             <span className="flex items-center gap-1.5 text-white text-xs sm:text-sm font-semibold">
               <Database className="w-3.5 h-3.5" />
@@ -312,7 +367,7 @@ function LiveDemoSection() {
             </span>
             <span
               key={active.collection}
-              className="recall-fade text-white/85 text-[10px] sm:text-xs font-mono"
+              className={`${fade} text-white/85 text-[10px] sm:text-xs font-mono`}
             >
               {active.collection}
             </span>
@@ -320,13 +375,13 @@ function LiveDemoSection() {
           <div className="flex-1 px-4 sm:px-5 py-5 sm:py-6 min-h-[280px] sm:min-h-[320px] flex flex-col">
             <span
               key={`${active.collection}-${active.operation}`}
-              className="recall-fade inline-flex self-start items-center bg-[#00684A]/10 text-[#00684A] rounded-full px-2 py-0.5 text-xs font-semibold mb-3 sm:mb-4"
+              className={`${fade} inline-flex self-start items-center bg-[#00684A]/10 text-[#00684A] rounded-full px-2 py-0.5 text-xs font-semibold mb-3 sm:mb-4`}
             >
               {active.operation}
             </span>
             <pre
               key={active.doc}
-              className="recall-fade flex-1 overflow-auto whitespace-pre-wrap break-words text-[#1f2a1d]/85 text-xs sm:text-sm leading-relaxed"
+              className={`${fade} flex-1 overflow-auto whitespace-pre-wrap break-words text-[#1f2a1d]/85 text-xs sm:text-sm leading-relaxed`}
             >
               <code className="font-mono">{active.doc}</code>
             </pre>
@@ -334,14 +389,22 @@ function LiveDemoSection() {
         </div>
       </div>
 
-      <div className="flex items-center justify-center gap-2 mt-8 sm:mt-10">
+      <div className="flex items-center justify-center gap-0 mt-8 sm:mt-10">
         {STEPS.map((step, i) => (
-          <span
+          <button
             key={step.label}
-            className={`h-1.5 rounded-full transition-all duration-500 ${
-              i === currentStep ? 'w-6 bg-[#336443]' : 'w-1.5 bg-[#336443]/20'
-            }`}
-          />
+            type="button"
+            onClick={() => jumpToStep(i)}
+            aria-label={`Go to step ${i + 1} of ${STEPS.length}`}
+            aria-current={i === currentStep ? 'true' : undefined}
+            className="p-2"
+          >
+            <span
+              className={`block h-1.5 rounded-full transition-all duration-500 ${
+                i === currentStep ? 'w-6 bg-[#336443]' : 'w-1.5 bg-[#336443]/20'
+              }`}
+            />
+          </button>
         ))}
       </div>
     </section>
