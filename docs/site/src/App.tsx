@@ -96,7 +96,18 @@ function ClosingCta() {
             className="hover:underline"
           >
             The plugin registers the hooks, the MCP server, and the slash commands automatically.
+          </a>{' '}
+          You still supply your own MongoDB Atlas, embedding, and LLM credentials as environment
+          variables before first use, per the{' '}
+          <a
+            href="https://github.com/saiteja05/mongo-claude-memory#configuration-reference"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:underline"
+          >
+            configuration reference
           </a>
+          .
         </p>
         <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6">
           <a
