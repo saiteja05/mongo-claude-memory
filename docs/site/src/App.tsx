@@ -89,21 +89,17 @@ function ClosingCta() {
           </div>
         </Reveal>
         <p className="mt-4 text-sm text-[#f7f5ef]/70">
-          <a
-            href="https://github.com/saiteja05/mongo-claude-memory#quick-start"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:underline"
-          >
-            The plugin registers the hooks, the MCP server, and the slash commands automatically.
-          </a>{' '}
-          You still supply your own MongoDB Atlas, embedding, and LLM credentials as environment
-          variables before first use, per the{' '}
+          The plugin registers the hooks, the MCP server, and the slash commands automatically.
+        </p>
+        <p className="mt-2 text-sm text-[#f7f5ef]/90">
+          Before first use, you will still need to set your own credentials: a MongoDB Atlas
+          connection string, plus one embedding/LLM credential (Voyage, AWS Bedrock, or a local
+          Ollama server). Full list in the{' '}
           <a
             href="https://github.com/saiteja05/mongo-claude-memory#configuration-reference"
             target="_blank"
             rel="noopener noreferrer"
-            className="hover:underline"
+            className="underline hover:text-[#f7f5ef]"
           >
             configuration reference
           </a>
