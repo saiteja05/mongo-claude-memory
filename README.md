@@ -53,6 +53,7 @@ flowchart LR
   - [Embedding modes (`EMBEDDING_MODE`)](#embedding-modes-embedding_mode)
   - [Rerank modes (`RERANK_MODE`)](#rerank-modes-rerank_mode)
   - [LLM provider (`LLM_PROVIDER`)](#llm-provider-llm_provider)
+  - [Configuring Ollama](#configuring-ollama)
   - [`VOYAGE_BASE_URL`: native Voyage vs. Atlas model API key](#voyage_base_url-native-voyage-vs-atlas-model-api-key)
   - [Credential matrix by combination](#credential-matrix-by-combination)
 - [Search pipeline](#search-pipeline)
@@ -487,6 +488,21 @@ Both modes are live, but `setup:indexes` only creates the index for the currentl
 | `ollama` | A local Ollama server call for fact extraction, no forced tool choice (Ollama has no equivalent to Anthropic/Bedrock's forced tool_choice, so extraction reliability depends on the chosen model's own function-calling quality). Free and fully local: no API key or cloud credentials needed. | None; requires `ollama serve` running locally with `OLLAMA_MODEL` already pulled (`ollama pull llama3.1`) |
 
 Ollama here only replaces the consolidator's fact-extraction LLM call: embeddings and reranking still require Voyage (or the Atlas model API) regardless of which `LLM_PROVIDER` is chosen, so a fully local, zero-API-key setup end to end is not yet available.
+
+### Configuring Ollama
+
+To run fact extraction fully locally, with no Anthropic key and no AWS credentials:
+
+```bash
+export LLM_PROVIDER="ollama"
+export OLLAMA_MODEL="llama3.1"
+```
+
+1. Install Ollama and start the server (`ollama serve`, or the desktop app, which starts it automatically).
+2. Pull a model that supports tool or function calling, for example `ollama pull llama3.1`. Extraction reliability depends on the chosen model's own function-calling quality, since Ollama has no equivalent to Anthropic or Bedrock's forced `tool_choice`.
+3. `OLLAMA_BASE_URL` defaults to `http://localhost:11434` and only needs to be set if the server runs somewhere other than localhost.
+
+Voyage (or an Atlas model API key) is still required for embeddings and reranking regardless of `LLM_PROVIDER`, per the credential matrix below.
 
 ### `VOYAGE_BASE_URL`: native Voyage vs. Atlas model API key
 
