@@ -1,4 +1,4 @@
-import path from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config.js";
 import { getProjectKey } from "../project/projectKey.js";
@@ -370,8 +370,20 @@ async function main(): Promise<void> {
 
 // Only run main() when this file is the actual entry point (node dist/hooks/sessionEnd.js),
 // never when imported as a module (e.g. by tests exercising captureSessionEnd directly).
-const isEntryPoint =
-  process.argv[1] !== undefined && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+// Node's ESM loader resolves symlinks when it builds import.meta.url, but
+// path.resolve(process.argv[1]) only normalizes the literal argv string and never touches
+// symlinks, so if the invocation path crosses a symlink (e.g. macOS /tmp -> /private/tmp) the
+// two strings never match. realpathSync on both sides removes that asymmetry; the try/catch
+// keeps this defensive (never throw here) so a deleted file or an unusual argv[1] just falls
+// back to isEntryPoint=false.
+let isEntryPoint = false;
+if (process.argv[1] !== undefined) {
+  try {
+    isEntryPoint = realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    isEntryPoint = false;
+  }
+}
 
 if (isEntryPoint) {
   main();

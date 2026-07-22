@@ -14,10 +14,8 @@ const BG_VIDEO =
 const HERO_EASE = [0.22, 1, 0.36, 1] as const;
 
 const INSTALL_COMMANDS = [
-  'git clone https://github.com/saiteja05/mongo-claude-memory',
-  'cd mongo-claude-memory',
-  'npm install && npm run build',
-  'npm run setup:indexes',
+  'claude plugin marketplace add saiteja05/mongo-claude-memory',
+  'claude plugin install recall',
 ];
 
 function ClosingCta() {
@@ -65,7 +63,7 @@ function ClosingCta() {
         </Reveal>
         <Reveal delay={0.14} className="mt-4">
           <p className="text-[#f7f5ef]/80 max-w-2xl mx-auto">
-            Two minutes to install. One minute to remove. Fully reversible: pull the three registrations and Claude Code is back to stock, nothing left behind.
+            Two commands to install, then a one-time `npm install` in the resolved plugin directory. One command to remove: `claude plugin uninstall recall`, and Claude Code is back to stock, nothing left behind.
           </p>
         </Reveal>
         <Reveal delay={0.2} className="mt-8">
@@ -92,17 +90,17 @@ function ClosingCta() {
         </Reveal>
         <p className="mt-4 text-sm text-[#f7f5ef]/70">
           <a
-            href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
+            href="https://github.com/saiteja05/mongo-claude-memory#quick-start"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:underline"
           >
-            Then wire the three hooks and the MCP server (about two minutes).
+            The plugin registers the hooks, the MCP server, and the slash commands automatically.
           </a>
         </p>
         <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6">
           <a
-            href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
+            href="https://github.com/saiteja05/mongo-claude-memory#quick-start"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center bg-[#f7f5ef] text-[#1f2a1d] font-medium px-6 py-3 rounded-full hover:bg-white/90 transition-colors"
@@ -313,7 +311,7 @@ function App() {
             );
           })}
           <a
-            href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
+            href="https://github.com/saiteja05/mongo-claude-memory#quick-start"
             target="_blank"
             rel="noopener noreferrer"
             className="ml-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-medium px-5 py-2.5 rounded-full transition-colors"
@@ -426,7 +424,7 @@ function App() {
               Docs
             </a>
             <a
-              href="https://github.com/saiteja05/mongo-claude-memory#getting-started"
+              href="https://github.com/saiteja05/mongo-claude-memory#quick-start"
               target="_blank"
               rel="noopener noreferrer"
               className="mt-2 bg-[#1f2a1d] hover:bg-[#2a3827] text-white text-sm font-semibold px-5 py-3 rounded-full transition-colors"

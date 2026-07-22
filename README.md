@@ -39,12 +39,10 @@ flowchart LR
 - [What stays unchanged](#what-stays-unchanged)
 - [Quick start](#quick-start)
   - [1. Prerequisites](#1-prerequisites)
-  - [2. Install and build](#2-install-and-build)
+  - [2. Install](#2-install)
   - [3. Minimal configuration](#3-minimal-configuration)
   - [4. Index setup](#4-index-setup)
-  - [5. Hook registration](#5-hook-registration)
-  - [6. MCP registration](#6-mcp-registration)
-  - [7. Consolidator scheduling](#7-consolidator-scheduling)
+  - [5. Consolidator scheduling](#5-consolidator-scheduling)
 - [Day-to-day use](#day-to-day-use)
   - [1. What happens automatically](#1-what-happens-automatically)
   - [2. Explicitly remembering something](#2-explicitly-remembering-something)
@@ -186,12 +184,45 @@ This system integrates through Claude Code's public extension points only, so it
 - A Voyage AI API key, or a MongoDB Atlas model API key (the Atlas Embedding and Reranking API), for embeddings and reranking
 - An Anthropic API key, AWS credentials for Bedrock, or a local Ollama server, for the consolidator's fact-extraction LLM call
 
-### 2. Install and build
+### 2. Install
+
+**Recommended: install as a plugin**
 
 ```bash
+claude plugin marketplace add saiteja05/mongo-claude-memory
+claude plugin install recall
+```
+
+`dist/` ships pre-built inside the plugin, so no build step is needed after install. The plugin's own dependencies still need a one-time install: find the resolved install directory with `claude plugin list --json` (the `installPath` field), then run `npm install` inside it once. This registers the hooks, the MCP server, and the `/remember`, `/recall-status`, and `/recall-doctor` commands automatically.
+
+> [!TIP]
+> The `recall-setup` skill walks through this end to end (finding the install directory, running that one-time `npm install`, configuring credentials, and verifying connectivity). Run it once right after installing the plugin, instead of following the manual steps below by hand.
+
+<details>
+<summary><strong>Manual install (without the plugin)</strong></summary>
+
+Clone the repo and build it locally instead of using the plugin:
+
+```bash
+git clone https://github.com/saiteja05/mongo-claude-memory
+cd mongo-claude-memory
 npm install
 npm run build
 ```
+
+Then wire the following hooks into Claude Code's settings (`hooks` in `settings.json`), pointing at the built `dist/` entry points:
+
+- `SessionStart`, matched with `"startup|resume|clear|compact"`, running `node dist/hooks/sessionStart.js`. This is what re-injects the brief after a compaction, a `/clear`, or a resume, not only at the very first launch.
+- `UserPromptSubmit`, running `node dist/hooks/userPromptSubmit.js`, to capture prompts whose first non-whitespace character is `#` as high-priority observations.
+- `SessionEnd`, running `node dist/hooks/sessionEnd.js`, to capture a transcript summary as an observation.
+
+All three hooks fail open unconditionally: any error, timeout, or missing configuration results in a silent no-op and a normal `exit(0)`, never a visible hook failure.
+
+A `/remember` slash command is provided at `.claude/commands/remember.md`; it writes the exact argument text to a temp file (to avoid shell-quoting issues) and invokes `node dist/capture/remember.js --file <path>`, which writes a high-priority observation with `source: "remember"`.
+
+Register the MCP server (`node dist/mcp/server.js`, stdio transport) to expose `memory_search`, `memory_write`, and `memory_forget` as tools. It reads the same environment variables as the hooks and resolves a default project key from the working directory it is launched in.
+
+</details>
 
 ### 3. Minimal configuration
 
@@ -211,23 +242,11 @@ npm run setup:indexes
 
 Run once against a fresh Atlas database, and safely re-run at any time (every step checks for existing state before creating anything). This creates the five collections if missing, the observation TTL index, the dropped-candidate TTL index, the beliefs compound index and archival TTL index, the vector search index matching the current `EMBEDDING_MODE` (`beliefs_vec` for app-side embeddings, `beliefs_vec_auto` for Atlas `autoEmbed`, only one is created, not both), and the `beliefs_text` BM25 search index. Search-index creation failures (for example, a Preview feature not enabled on a given cluster) are logged and skipped without blocking the rest of setup.
 
-### 5. Hook registration
+If you installed the plugin, run this from the resolved install directory (`claude plugin list --json`, the `installPath` field), not the plugin source repo.
 
-Wire the following hooks into Claude Code's settings (`hooks` in `settings.json`), pointing at the built `dist/` entry points:
+### 5. Consolidator scheduling
 
-- `SessionStart`, matched with `"startup|resume|clear|compact"`, running `node dist/hooks/sessionStart.js`. This is what re-injects the brief after a compaction, a `/clear`, or a resume, not only at the very first launch.
-- `UserPromptSubmit`, running `node dist/hooks/userPromptSubmit.js`, to capture prompts whose first non-whitespace character is `#` as high-priority observations.
-- `SessionEnd`, running `node dist/hooks/sessionEnd.js`, to capture a transcript summary as an observation.
-
-All three hooks fail open unconditionally: any error, timeout, or missing configuration results in a silent no-op and a normal `exit(0)`, never a visible hook failure.
-
-A `/remember` slash command is provided at `.claude/commands/remember.md`; it writes the exact argument text to a temp file (to avoid shell-quoting issues) and invokes `node dist/capture/remember.js --file <path>`, which writes a high-priority observation with `source: "remember"`.
-
-### 6. MCP registration
-
-Register the MCP server (`node dist/mcp/server.js`, stdio transport) to expose `memory_search`, `memory_write`, and `memory_forget` as tools. It reads the same environment variables as the hooks and resolves a default project key from the working directory it is launched in.
-
-### 7. Consolidator scheduling
+This step is unaffected by which install path you used: cron or a trigger calls the same `dist/consolidation/cli.js` entry point either way. If you are scheduling against a plugin-installed copy rather than a manual clone, find the resolved directory first with `claude plugin list --json` (the `installPath` field) and use that path in place of `/path/to/mongo-claude-memory` below.
 
 The consolidator (`node dist/consolidation/cli.js`) is a cron/trigger entry point, not a hook: unlike the hooks, it prints normal progress output and can exit non-zero on a genuine crash. Example crontab line, running every 15 minutes:
 

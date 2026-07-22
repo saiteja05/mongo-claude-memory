@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, symlinkSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   captureSessionEnd,
   captureSessionEndWithTimeout,
@@ -10,6 +12,13 @@ import {
   type SessionEndInput,
 } from "../src/hooks/sessionEnd.js";
 import { TRANSCRIPT_TAIL_LENGTH } from "../src/capture/constants.js";
+
+// Used only by the real-subprocess regression test below: locates the
+// already-built dist/ tree so it can be reached through a directory symlink
+// created purely for that one test.
+const thisDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(thisDir, "..");
+const distDir = path.join(repoRoot, "dist");
 
 afterEach(() => {
   vi.useRealTimers();
@@ -592,4 +601,53 @@ describe("captureSessionEnd brief stripping", () => {
     const paramsList = writeObservations.mock.calls[0][0] as Array<{ text: string }>;
     expect(paramsList[0].text).toBe(tail);
   });
+});
+
+describe("entry-point detection survives symlinked invocation paths (regression)", () => {
+  it(
+    "still runs main() and logs a failure line when the compiled script is invoked " +
+      "through a symlinked directory",
+    () => {
+      // Regression test for a real bug: fileURLToPath(import.meta.url) is
+      // symlink-resolved by Node's ESM loader, but path.resolve(process.argv[1])
+      // only normalizes the literal argv string and never follows symlinks. If
+      // the invocation path crosses a symlink, the old string comparison never
+      // matched, isEntryPoint stayed false, and main() silently never ran. This
+      // spawns the REAL compiled dist/hooks/sessionEnd.js as an actual child
+      // process, reached through a directory symlink to the real dist/ tree (so
+      // its relative imports still resolve), feeds it invalid JSON on stdin so
+      // that main(), if it runs, reaches JSON.parse's catch and calls
+      // appendFailure("sessionEnd", err) without ever touching Mongo (the
+      // env-var gate is satisfied with a dummy connection string, but the
+      // JSON.parse throw happens before any DB code runs), and asserts on the
+      // resulting failure log file. It only passes if main() genuinely executed.
+      const outerDir = mkdtempSync(path.join(tmpdir(), "mongo-claude-memory-sessionend-outer-"));
+      const failureLogDir = mkdtempSync(
+        path.join(tmpdir(), "mongo-claude-memory-sessionend-log-")
+      );
+      const failureLogFile = path.join(failureLogDir, "failures.log");
+      const linkPath = path.join(outerDir, "linked");
+
+      try {
+        symlinkSync(distDir, linkPath, "dir");
+        const scriptPath = path.join(linkPath, "hooks", "sessionEnd.js");
+
+        execFileSync(process.execPath, [scriptPath], {
+          input: "this is not valid json",
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            MDB_MCP_CONNECTION_STRING: "dummy-connection-string-for-test",
+            MEMORY_FAILURE_LOG: failureLogFile,
+          },
+        });
+
+        const logged = readFileSync(failureLogFile, "utf8");
+        expect(logged).toMatch(/ sessionEnd SyntaxError$/m);
+      } finally {
+        rmSync(outerDir, { recursive: true, force: true });
+        rmSync(failureLogDir, { recursive: true, force: true });
+      }
+    }
+  );
 });

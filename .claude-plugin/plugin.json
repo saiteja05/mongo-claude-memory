@@ -1,0 +1,13 @@
+{
+  "name": "recall",
+  "version": "0.1.0",
+  "description": "MongoDB Atlas-backed persistent memory for Claude Code: automatic session-brief injection, hash-line and transcript capture, and memory_search/memory_write/memory_forget MCP tools.",
+  "author": {
+    "name": "Sai Teja",
+    "email": "teja.boddapati@gmail.com"
+  },
+  "homepage": "https://github.com/saiteja05/mongo-claude-memory",
+  "repository": "https://github.com/saiteja05/mongo-claude-memory",
+  "keywords": ["memory", "mongodb", "atlas", "mcp", "context", "recall"],
+  "mcpServers": "./mcp.json"
+}

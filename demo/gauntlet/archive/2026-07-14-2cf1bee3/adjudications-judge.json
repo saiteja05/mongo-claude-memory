@@ -1,0 +1,182 @@
+[
+  {
+    "arm": "stock",
+    "factId": "f04",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it doesn't know and only mentions MongoDB as an example suggestion (\"e.g., MongoDB, Postgres\"), not as a recalled fact. This is a miss per the rules.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "5ff217be0f51db66e3a5ae5b73e50a00e288b5f2dd76f4883e92e0a464a66876"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f01",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer clearly states the idempotency key format is `{orderId}:{attempt}` (colon-joined), with the explicit example `ord_123:2`, which matches the ground truth exactly. The caveats about implementation do not undermine the correct assertion of the format.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "b8c6bff39fb9750ed796123581857ecfaf694b3277634b822d7e56dd044e04d4"
+  },
+  {
+    "arm": "stock",
+    "factId": "f12",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer claims no CI system is configured and denies the existence of any GitHub Actions workflows, directly contradicting the fact that orderflow uses GitHub Actions. It does not recall the correct value.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "86d1b539dba3dd2af51b0866eac0f5cefba9c95189538927d0fe0a950eefe23f"
+  },
+  {
+    "arm": "engine",
+    "factId": "f08",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer does not state where orderflow currently deploys. It only mentions that no Heroku references exist, without asserting that the deployment target is Render.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "ebd1729ede371de038b72a32a479cae7f9adde76f808aaee027cfc441dbe4ec1"
+  },
+  {
+    "arm": "engine",
+    "factId": "f01",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly denies that any such idempotency key construction exists in the codebase and refuses to state the format, rather than recalling the fact (order id + attempt number joined with a colon, e.g. ord_123:2). It does not assert the correct value at all.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "075c38ce06676aa7556021aa4ea7e8561b008341f3606c2057d3a23a355de2d0"
+  },
+  {
+    "arm": "control",
+    "factId": "f11",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it does not know the logging destination and mentions Datadog only as one of several example guesses, not as an assertion of the true value.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "5af74e1dec06f1ecf55fa8ddee3357610148f9a2c48ce88720d0fde78f8ce11b"
+  },
+  {
+    "arm": "stock",
+    "factId": "f01",
+    "trial": 1,
+    "verdict": "correct",
+    "reason": "The answer clearly states the idempotency key is constructed as `<orderId>:<attemptNumber>` (colon-joined), and gives the exact example `ord_123:2`, which matches the ground truth precisely.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "749135c69010b73d3210e12b4f998e38e1c6fd870e5a6cdcea8673a954fcf97b"
+  },
+  {
+    "arm": "stock",
+    "factId": "f04",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it cannot recall the data store and offers \"MongoDB Atlas\" only as an example suggestion (e.g., MongoDB Atlas, Postgres), not as an asserted fact. This is a miss, not a recall of the true value.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "bc4f22e5be2ed62126b10057fd86208a2dc752fd1a690c1fe485ee1d77018c74"
+  },
+  {
+    "arm": "engine",
+    "factId": "f02",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer does not clearly assert that orderflow uses pnpm as its package manager. Instead, it hedges by saying there's no evidence of a package manager in the current repo, and only mentions pnpm as part of an \"intended setup\" in a \"session note\" that \"hasn't actually been applied.\" This fails to recall the fact as current and true.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "251deaa4fabba2ea2cf1116453e64765df6fa32c39b6b1a92457f1ca8c4b3ae4"
+  },
+  {
+    "arm": "control",
+    "factId": "f04",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it does not know where orderflow stores its records and mentions MongoDB Atlas only as a hypothetical example (\"e.g., MongoDB Atlas, Postgres\"), not as a recalled fact. This is a miss.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "7b0bee05d3fafbe20b3f5de6d91e2701923c5b30518e5a24fa5776b16d51ec7a"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f07",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer states the staging Stripe webhook secret rotates on a 90-day cycle, which matches the ground truth of every 90 days.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "691b7fb4b4de22db7a2300b851aa77546eed3d41c5c011580828a9110a2d9fa7"
+  },
+  {
+    "arm": "control",
+    "factId": "f11",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it does not have the information and mentions Datadog only as an example in a list of possibilities (\"e.g., Datadog, CloudWatch, a log aggregator\"), not as a recalled fact. This is not a demonstration of recall of the true value.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "71a63f2779b832091efdab6ce7970e7836d165212f33aa02115512b7b81cff5f"
+  },
+  {
+    "arm": "control",
+    "factId": "f12",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer claims no CI system exists and denies any knowledge of one, while mentioning GitHub Actions only as a generic suggestion. It does not assert the true fact that orderflow uses GitHub Actions with a 10-minute per-job timeout.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "37e50b296a1c8e81629571816b8bc10b870426dd55a110f90203ffe324246a40"
+  },
+  {
+    "arm": "control",
+    "factId": "f02",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer claims the orderflow project has no indicated package manager and offers npm/yarn/pnpm as options, failing to assert that pnpm is the correct answer. This is a miss, not a recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "18b99130205bdd68d3cd914417d50c38a739f3f998914f6cfb073a631483522e"
+  },
+  {
+    "arm": "stock",
+    "factId": "f11",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it does not know the log shipping destination and only mentions Datadog as an example possibility (alongside Papertrail), never asserting it as the actual answer.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "a00d0f8b6c840c3b5379de9b3546e2e4c0d903ad5bd19ba9582f030ed9fbff1f"
+  },
+  {
+    "arm": "stock",
+    "factId": "f03",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer correctly states the retry policy as 5 delivery attempts with exponential backoff, which matches the ground truth. The additional detail about an on-call alert and the note about implementation status are supplementary and do not contradict the core fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "154196edaf36dab41fb2c3bc8a5c10f0785a437108ff5b17e1e695df215a0f53"
+  },
+  {
+    "arm": "engine",
+    "factId": "f02",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer does not assert that orderflow uses pnpm as its package manager. It says there is no lockfile or specification in the current state, and only mentions pnpm as part of an \"intended\" setup that hasn't been written yet, offering to set it up. This does not constitute a recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "f632041442f8aea452b6eaee810f6b46c842846f74f96de7b4f24f6cba98c7af"
+  },
+  {
+    "arm": "control",
+    "factId": "f02",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer claims there is no specified package manager and offers to add one, explicitly listing pnpm as just one of several options. It does not assert that pnpm is the package manager used by orderflow.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-14T13:06:42.382Z",
+    "answerSha256": "55a8ce3ef0a63162791c025fb737a6a35556bede9872fe0912dc019ae35976d6"
+  }
+]

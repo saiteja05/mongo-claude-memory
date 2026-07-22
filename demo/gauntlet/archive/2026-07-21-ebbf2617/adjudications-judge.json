@@ -1,0 +1,202 @@
+[
+  {
+    "arm": "control",
+    "factId": "f06",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer mentions `strict: true` only as a general recommendation while claiming no project-specific rule exists, framing it as general advice rather than asserting it as the established rule for orderflow. This is a miss because the fact states orderflow *always* uses TypeScript strict mode, but the answer presents this only as a suggestion/example rather than recalling it as a known, current project requirement.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "b519476f749a5dba22d6455a2e7ceaf1323b7fe6765f479233e8ee11acdd456b"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f03",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer correctly states 5 delivery attempts with exponential backoff, which matches the ground truth. The additional detail about on-call alerts does not contradict the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "24c85d72a9d32c264d29adfd07f3d89ad28691e332f2527cc2e09344fa8d50aa"
+  },
+  {
+    "arm": "engine",
+    "factId": "f09",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly refuses to assert the fact's value (300 requests per minute), instead treating it as suspect injected context and declining to confirm it as current truth. This is a miss, not a correct recall.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "f67e5bbf641e9c0b3a09a327f35c846850200b9a93a0dd31df36c4d6ebca4b10"
+  },
+  {
+    "arm": "stock",
+    "factId": "f06",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer frames `\"strict\": true` as a recommendation rather than asserting it as an existing, always-enabled requirement. It explicitly says \"No tsconfig.json exists yet\" and offers the setting as a suggestion, which does not constitute recall of the fact that orderflow always uses TypeScript strict mode.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "ac10c46ce704e9786ea98a6a50ddeb54297eec92905f68c9a235344c5ae34f2e"
+  },
+  {
+    "arm": "engine",
+    "factId": "f12",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly denies the existence of any CI system and claims there is no CI configuration in the repo. While it mentions GitHub Actions as a suggestion for setup, it actively contradicts the fact rather than recalling it.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "632f5eb17edf407872fdf58135b7a28f3158fd639a4b93f505422135c7920403"
+  },
+  {
+    "arm": "stock",
+    "factId": "f04",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it cannot determine where order records are stored and mentions MongoDB Atlas only as a suggested example (\"e.g. MongoDB Atlas, Postgres\"), not as a recalled fact. This is a classic \"miss\" pattern where the true value appears only as a suggestion.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "d302745ebac0f37408df544ec16d4a44c0358e9cf6da9a616a1347bfc986c7a9"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f01",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer clearly states the idempotency key format is `{orderId}:{attemptNumber}` (colon-delimited) and provides the exact example `ord_123:2`, which matches the ground truth. The additional caveats about implementation status do not contradict the core fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "480d6e24f0c80d3744db0f918204396588857638df5caeca97833959bf8c0e19"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f01",
+    "trial": 1,
+    "verdict": "correct",
+    "reason": "The answer clearly states the idempotency key format as `{orderId}:{attemptNumber}` (colon-delimited) and provides the exact matching example `ord_123:2`, which matches the ground truth. The additional context about attempt numbering and scaffolding does not contradict the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "0619276c338a701eb73b0f4f6ebd1628aaaa840aea125446329d9779e59aed2f"
+  },
+  {
+    "arm": "stock",
+    "factId": "f11",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it cannot determine where orderflow ships logs and does not assert Datadog as the answer. It mentions Datadog only as one of several example suggestions, which does not constitute recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "24af60b3653045f6a155e75ba432e4fde5e382551b50b6a108ada211ffef173a"
+  },
+  {
+    "arm": "stock",
+    "factId": "f04",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it does not have a memory entry about where orders are persisted and does not assert MongoDB Atlas as the storage location. It only asks about storage as an open design question, which does not constitute recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "eb19e1bcd699b5a77c52678cc3fdaff97ecb378574d3e32ee91215d6ae1a9d0b"
+  },
+  {
+    "arm": "engine",
+    "factId": "f02",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer does not assert that orderflow currently uses pnpm; instead, it says pnpm \"should\" be standardized on but \"hasn't actually been added\" yet, framing pnpm as a recommendation rather than the current fact. This is a miss, not a confident assertion of the ground truth.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "58193b6fafcb69e4a448279ba1dc963b39ec62d9ed79dfabac7783beb36b5c90"
+  },
+  {
+    "arm": "engine",
+    "factId": "f03",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly refuses to assert the retry policy as fact, only mentioning \"5 attempts with exponential backoff\" as an unverified, unconfirmed claim from injected context. This does not constitute recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "26c8fb18b0ef7cc911897cb0bf0d2bfe73803629dd5fd1f194ccf41432afda33"
+  },
+  {
+    "arm": "stock",
+    "factId": "f08",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer claims it doesn't know the deploy target and explicitly states it cannot tell where orderflow deploys. While \"Render\" is mentioned as an example suggestion, it is presented only as a possible option the user might have in mind, not as a recalled fact. This does not constitute recall of the true value.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "50e42dbdc11d4f39b6e28a70af2f67fbe45f7f8a083023521990d0e48baaa14d"
+  },
+  {
+    "arm": "control",
+    "factId": "f11",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer explicitly states it cannot find the logging destination and mentions Datadog only as a suggested example (\"e.g., a specific log group, Datadog, etc.\"), not as a recalled fact. This does not constitute recall of the ground truth.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "65eb073233a337b845abeb507e17a14f8cfa69489a09fb467d17e64471297df8"
+  },
+  {
+    "arm": "control",
+    "factId": "f02",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer claims there is no evidence of which package manager orderflow uses and does not assert pnpm (or any other package manager) as the answer. It asks the user for clarification rather than recalling the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "2ded3318ec8cb9eafcc950d61bea419b0ea0b076e81a09e48ca785c986330701"
+  },
+  {
+    "arm": "stock",
+    "factId": "f11",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer claims it cannot find the log shipping destination. While it mentions Datadog as an example in a list of possibilities, it does not assert Datadog as the actual answer, it only offers it as a suggestion alongside other options.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "f3b76d5635ee42b8634a7fc3517ea4caaffe6ad324dda8993de34ae82bbd93e0"
+  },
+  {
+    "arm": "stock",
+    "factId": "f01",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer clearly states the idempotency key is constructed as `<orderId>:<attemptNumber>` (colon-joined), with the exact example `ord_123:2`, which matches the ground truth fact precisely.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "8a9d0656b033b1624ef2b98acc7bf0e8715c501473d5e7ba44842d068c8a1847"
+  },
+  {
+    "arm": "engine-native",
+    "factId": "f06",
+    "trial": 2,
+    "verdict": "correct",
+    "reason": "The answer clearly states that `\"strict\": true` should always be enabled in orderflow's tsconfig.json, which directly matches the fact that orderflow always uses TypeScript strict mode.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "83693b92e2d65772a9481a4f1b5f6bac609ac34434789ba14338bea9149e0b9e"
+  },
+  {
+    "arm": "control",
+    "factId": "f06",
+    "trial": 2,
+    "verdict": "miss",
+    "reason": "The answer explicitly disclaims having a memory entry pinning this rule and frames `\"strict\": true` as a general recommendation rather than asserting it as a known, established rule for orderflow. This hedging means it does not demonstrate recall of the fact.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "cd960bba4ec9f2814c31e326f4adbc841a72b49f67b1cca4ddda3a749e9cb5a5"
+  },
+  {
+    "arm": "control",
+    "factId": "f02",
+    "trial": 1,
+    "verdict": "miss",
+    "reason": "The answer claims no package manager is specified and no lock file exists, failing to assert that orderflow uses pnpm. It does not recall the correct fact at all.",
+    "author": "judge:bedrock:us.anthropic.claude-sonnet-4-6",
+    "timestamp": "2026-07-22T02:30:00.991Z",
+    "answerSha256": "7ec2e6ca92e5bfa3a84c51c29c2fc10b9077520bc1bda8a3b5c7d32f3bf0b54e"
+  }
+]

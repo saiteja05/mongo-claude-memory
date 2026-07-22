@@ -21,8 +21,12 @@ mktemp -t mongo-claude-memory-remember
    step 1 in place of `<path>`:
 
 ```
-node dist/capture/remember.js --file <path>
+node "${CLAUDE_PLUGIN_ROOT}/dist/capture/remember.js" --file <path>
 ```
+
+If this command fails with a `Cannot find module` error, dependencies have
+not been installed yet: run the `recall-setup` skill, or run `npm install`
+once inside `${CLAUDE_PLUGIN_ROOT}`, then retry.
 
 4. Run this exact command using the Bash tool to remove the temp file,
    substituting the same path from step 1 in place of `<path>`:

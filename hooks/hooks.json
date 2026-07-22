@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hooks/pluginGuard.js\" \"${CLAUDE_PLUGIN_ROOT}\" sessionStart", "async": false }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hooks/pluginGuard.js\" \"${CLAUDE_PLUGIN_ROOT}\" userPromptSubmit", "async": false }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hooks/pluginGuard.js\" \"${CLAUDE_PLUGIN_ROOT}\" sessionEnd", "async": false }
+        ]
+      }
+    ]
+  }
+}
