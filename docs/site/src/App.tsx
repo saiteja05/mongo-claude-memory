@@ -93,8 +93,9 @@ function ClosingCta() {
         </p>
         <p className="mt-2 text-sm text-[#f7f5ef]/90">
           Before first use, you will still need to set your own credentials: a MongoDB Atlas
-          connection string, plus one embedding/LLM credential (Voyage, AWS Bedrock, or a local
-          Ollama server). Full list in the{' '}
+          connection string, an embedding credential (Voyage, or an Atlas model API key), and an
+          LLM credential for fact extraction (Anthropic, AWS Bedrock, or a local Ollama server,
+          which needs no API key). Full list in the{' '}
           <a
             href="https://github.com/saiteja05/mongo-claude-memory#configuration-reference"
             target="_blank"
